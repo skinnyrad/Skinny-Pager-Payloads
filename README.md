@@ -32,7 +32,7 @@ Before deploying, ensure your Pager is internet connected. The installation scri
 
 SSH into your Pager as root, navigate to the persistent storage root directory, clone the repository, and execute the installer with this command sequence:
 
-`cd /root && git clone [https://github.com/skinnyrad/Skinny-Tools.git](https://github.com/skinnyrad/Skinny-Tools.git) && cd Skinny-Tools && chmod +x online-install.sh && ./online-install.sh`
+`cd /root && git clone https://github.com/skinnyrad/Skinny-Tools.git && cd Skinny-Tools && chmod +x online-install.sh && ./online-install.sh`
 
 ---
 
