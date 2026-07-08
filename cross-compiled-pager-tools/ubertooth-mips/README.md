@@ -1,7 +1,3 @@
-Here is a clean, markdown-formatted `README.md` file tailored for your setup. It contains the exact commands and the required dependencies context (since OpenWrt `.ipk` files need to be installed in a specific order due to dependencies).
-
----
-
 # README: Installing Ubertooth Utilities on Hak5 WiFi Pineapple
 
 This archive contains the Ubertooth binaries cross-compiled for the `mipsel_24kc` architecture, specifically configured to run on the **Hak5 WiFi Pineapple (Mark VII / Enterprise)** architecture.
