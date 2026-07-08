@@ -1,0 +1,2 @@
+Note: this is not a Skinny R&D payload. This is here for organizational purposes for students.
+Original Author is cncartistsec at https://github.com/cncartistsec/WiFi-Pineapple-Pager-Payloads
