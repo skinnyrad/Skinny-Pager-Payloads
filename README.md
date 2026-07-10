@@ -34,6 +34,49 @@ SSH into your Pager as root, navigate to the persistent storage root directory, 
 
 `opkg update && opkg install git-http && cd /root && git clone https://github.com/skinnyrad/Skinny-Tools.git && cd Skinny-Tools && chmod +x online-install.sh && ./online-install.sh`
 
+### 3. Usage Modes
+
+The installer supports two modes. Run it from inside the cloned `Skinny-Tools/` repository so it can discover `payloads/` and `cross-compiled-pager-tools/`.
+
+```
+./online-install.sh           # Install / update (default)
+./online-install.sh --uninstall   # Remove all Skinny-Tools customizations
+./online-install.sh --help        # Show usage
+```
+
+The default install/update flow is fully re-runnable: a second run after `git pull` will only install newly-added `.ipk` packages and copy any new payload files, leaving everything else alone. The script preserves any local tweaks you have made to existing payload files.
+
+---
+
+## Uninstalling
+
+To return the Pager to its pre-Skinny-Tools state, run:
+
+```
+cd /root/Skinny-Tools && ./online-install.sh --uninstall
+```
+
+The uninstall will:
+
+* Remove every cross-compiled **tool** `.ipk` package installed by this repo (under `cross-compiled-pager-tools/`, e.g. `rtl_433`, `ubertooth-utils`).
+* Remove every custom payload directory staged under `payloads/user/Skinny-Tools/`, `payloads/user/utilities/`, and the `payloads/recon/` trees.
+* Remove the `PagerCTL` hardware-interface symlinks at `/usr/lib/libpagerctl.so` and inside the Python `site-packages` directory.
+
+The uninstall will **not** touch:
+
+* Hak5 factory payloads (`payloads/alerts/*`, factory `payloads/recon/*`, factory `payloads/user/*` like `evil_portal`, `prank`, etc.).
+* Cross-compiled **library** `.ipk` packages (`librtlsdr`, `libbtbb`, `libubertooth`, ...). These are general-purpose system libraries that other Pager workflows may rely on, so they are left in place.
+* The system packages installed by the pre-flight phase (`python3`, `aircrack-ng`, `tcpdump`, `libpcap`, `libopenssl`, `libffi`, `libbz2`, `zlib`, `libpcre2`, `libnl-core200`, `libnl-genl200`). These are general-purpose tools that other Pager workflows may rely on, so they are left in place.
+
+For a full factory reset, remove everything manually:
+
+  ```
+  opkg remove rtl_433 ubertooth-utils \
+              librtlsdr libbtbb libubertooth \
+              python3 aircrack-ng tcpdump libpcap libopenssl \
+              libffi libbz2 zlib libpcre2 libnl-core200 libnl-genl200
+  ```
+
 ---
 
 ## Automated Payload Deployment & Safety
@@ -42,7 +85,7 @@ The `online-install.sh` script automatically deploys all custom tools into their
 
 ### Safe Merge Mapping
 
-The deployment utilizes non-destructive recursive mirroring (`cp -r`). Running this installer safely merges the custom Skinny R&D utilities directly inside their designated functional menus (such as the Recon and User configurations).
+The deployment uses a per-file no-clobber copy: only files that don't already exist at the destination are written, and any local tweaks to existing payload files are preserved across re-runs. This safely merges the custom Skinny R&D utilities directly inside their designated functional menus (such as the Recon and User configurations) without overwriting Hak5 factory modules that share the same parent directory.
 
 This automation preserves all pre-existing factory modules and configuration layers. It will never purge, wipe, format, or overwrite unrelated operational tools already resident on the hardware. Additionally, the installer executes a global sweep to verify that all shell entry points and launchers retain proper executable flags (`chmod +x`) to allow immediate execution from the Pager's physical UI menus.
 
