@@ -288,6 +288,40 @@ SKINNY_STAGE=""
 # cruft on the Pager. rm -rf on empty vars is a harmless no-op.
 trap 'rm -rf "$HAK5_STAGE" "$SKINNY_STAGE" 2>/dev/null' EXIT
 
+# Shared helper for payload tree-walking. Used by both Phase 1A (Hak5 fetch)
+# and Phase 4 (Skinny-Tools mirror) so the two phases cannot drift in their
+# iteration logic. Copies each payload subdir from $1 (src) into $2 (dst
+# root) using dir-level no-clobber semantics: if a subdir of the same name
+# already exists at the destination, the entry is skipped entirely (no files
+# are touched). Updates the MERGE_NEW_LABELS, MERGE_PRESENT_LABELS, and
+# MERGE_FAILED_LABELS globals (space-separated "<label>/<name>" strings) and
+# emits "[NEW PAYLOAD] <label>/<name>" to stdout for each newly copied
+# entry. The caller translates the labels into its preferred summary format.
+merge_payload_category() {
+  src="$1"
+  dst_root="$2"
+  label="$3"
+  [ -d "$src" ] || return 0
+  for entry in "$src"/*; do
+    [ -d "$entry" ] || continue
+    name="$(basename "$entry")"
+    full_label="$label/$name"
+    dst="$dst_root/$name"
+    if [ -d "$dst" ]; then
+      MERGE_PRESENT_LABELS="${MERGE_PRESENT_LABELS}${MERGE_PRESENT_LABELS:+ }$full_label"
+    else
+      mkdir -p "$dst"
+      if cp -r "$entry/." "$dst/" 2>/dev/null; then
+        MERGE_NEW_LABELS="${MERGE_NEW_LABELS}${MERGE_NEW_LABELS:+ }$full_label"
+        echo "[NEW PAYLOAD] $full_label"
+      else
+        rm -rf "$dst"
+        MERGE_FAILED_LABELS="${MERGE_FAILED_LABELS}${MERGE_FAILED_LABELS:+ }$full_label"
+      fi
+    fi
+  done
+}
+
 # ==========================================
 # PHASE 1: Internet Connectivity Check
 # ==========================================
@@ -347,33 +381,28 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
   HAK5_NEW=0
   HAK5_PRESENT=0
   HAK5_FAILED=""
-  # Hak5's payload convention: library/<tree>/<payload-folder>/payload.sh
-  # We mirror one folder deep per payload - matches how the Pager UI
-  # expects to find each payload on disk.
-  for tree in alerts recon user; do
-    src_tree="$HAK5_SRC/$tree"
-    [ -d "$src_tree" ] || continue
-    for entry in "$src_tree"/*; do
-      [ -d "$entry" ] || continue
-      name="$(basename "$entry")"
-      dst="$SYSTEM_PAYLOADS_DEST/$tree/$name"
-      if [ -d "$dst" ]; then
-        # Already on the Pager - never touch it (no-clobber).
-        HAK5_PRESENT=$((HAK5_PRESENT + 1))
-      else
-        mkdir -p "$dst"
-        # Fresh copy. cp -r of the folder contents into the empty dest -
-        # safe because we just verified $dst doesn't exist.
-        if cp -r "$entry/." "$dst/" 2>/dev/null; then
-          HAK5_NEW=$((HAK5_NEW + 1))
-          echo "[NEW PAYLOAD] $tree/$name"
-        else
-          HAK5_FAILED="$HAK5_FAILED $tree/$name"
-          rm -rf "$dst"
-        fi
-      fi
-    done
+  MERGE_NEW_LABELS=""
+  MERGE_PRESENT_LABELS=""
+  MERGE_FAILED_LABELS=""
+
+  # Hak5's library/ tree is mostly flat (alerts/, user/) but the recon/
+  # subtree nests payloads two levels deep: library/recon/<subtree>/<payload>.
+  # The Pager ships empty skeleton folders at /mmc/root/payloads/recon/<subtree>/
+  # by default, so a single one-level walk over library/recon/* would only see
+  # the subtree roots and incorrectly mark every recon payload as "already
+  # present". Two passes - flat then nested - keep the recursion explicit.
+  for tree in alerts user; do
+    merge_payload_category "$HAK5_SRC/$tree" "$SYSTEM_PAYLOADS_DEST/$tree" "$tree"
   done
+  for subtree in access_point client; do
+    merge_payload_category "$HAK5_SRC/recon/$subtree" \
+                           "$SYSTEM_PAYLOADS_DEST/recon/$subtree" \
+                           "recon/$subtree"
+  done
+
+  HAK5_NEW=$(echo "$MERGE_NEW_LABELS" | wc -w)
+  HAK5_PRESENT=$(echo "$MERGE_PRESENT_LABELS" | wc -w)
+  HAK5_FAILED="$MERGE_FAILED_LABELS"
 
   # Ensure any launcher scripts Hak5 ships with executable bit set.
   for tree in alerts recon user; do
