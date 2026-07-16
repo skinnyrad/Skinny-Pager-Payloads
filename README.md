@@ -12,11 +12,19 @@ Welcome to the official Skinny R&D payload and utility repository for the Hak5 W
 
 
 
+### Capabilities Added (Cross-compiled tools)
+* **rtl_433_MIPS** - Write payloads to detect TPMS sensors and other RTL-SDR detections
+* **Ubertooth-MIPS** - Installs cross-compiled Ubertooth tools and libraries for use in Bluetooth payloads
+
+---
+
 ### Credits & Dependencies
 
 The hardware mapping utilities (`pagerctl.py` and `libpagerctl.so`) included in this repository are from the open-source work from the [pineapple_pager_pagerctl project](https://github.com/pineapple-pager-projects/pineapple_pager_pagerctl) by brainphreak.
 
 Skinny R&D utilizes this framework to drive direct Python interactions with the Pager's display buffers for several fox hunting payloads. This direct integration provides the reduced latency and faster screen refresh performance critical for real-time signal tracking and foxhunting operations. Pagerctl is not used for all payloads.
+
+
 
 ---
 
