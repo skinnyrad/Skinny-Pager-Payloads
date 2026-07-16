@@ -2,13 +2,21 @@
 # Title: Git Repository Live Online Installer (Python, Security Tools, & Payloads)
 # Author: Jeff Benson (erg0Pr0xy) - Skinny Research & Development
 #
-# Install phases:
-#   1. Internet connectivity check
-#   2. Pre-flight dependency check (tcpdump, aircrack-ng, python3)
-#   3. Recursive .ipk discovery & install under cross-compiled-pager-tools/
-#   4. Payload tree mirror with new-payload detection
-#   5. Global pagerctl hardware-interface symlinks
-#   6. Verification & summary
+# Install flow:
+#   0.  S/H/B selector: choose Skinny-Tools, Hak5 library/ payloads, or both
+#   1.  Internet connectivity check
+#   1A. Hak5 payload pull (H or B only) - fetches
+#         github.com/hak5/wifipineapplepager-payloads/library and merges
+#         new payload folders into /mmc/root/payloads/ (no-clobber)
+#   1B. Skinny-Tools repo auto-fetch (S or B only) - if a full local clone
+#         isn't next to the script, fetches the GitHub tarball so Phase 3-5
+#         have payloads/, cross-compiled-pager-tools/, pagerctl.{py,so} to
+#         work with. Existing users with a full clone see no behavior change.
+#   2.  Pre-flight dependency check (tcpdump, aircrack-ng, python3)  [S/B only]
+#   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/  [S/B only]
+#   4.  Payload tree mirror with new-payload detection  [S/B only]
+#   5.  Global pagerctl hardware-interface symlinks  [S/B only]
+#   6.  Verification & summary  [S/B only]
 #
 # Uninstall phases (--uninstall):
 #   U1. Remove cross-compiled .ipk packages
@@ -26,7 +34,15 @@ case "${1:-}" in
     cat <<EOF
 Usage: $0 [--uninstall] [--help]
 
-Default (no flag):  Install / update Skinny-Tools on the Pager.
+Default (no flag):  Interactive prompt asks which payload sources to pull:
+                      [S] Skinny-Tools (full install/update, identical to
+                          prior behavior)
+                      [H] Hak5 library/ payloads from
+                          github.com/hak5/wifipineapplepager-payloads
+                      [B] Both (Skinny-Tools + Hak5)
+                   All payload merges use no-clobber semantics: only
+                   missing payloads are copied, nothing on the Pager is
+                   ever removed by this script.
   --uninstall, -u:   Remove all Skinny-Tools customizations (cross-compiled
                    tool .ipk packages, custom payload directories, and
                    PagerCTL hardware-interface symlinks). Preserves all
@@ -38,7 +54,9 @@ Default (no flag):  Install / update Skinny-Tools on the Pager.
 --help, -h:        Show this help.
 
 Run from inside the cloned Skinny-Tools repository so the script can
-discover payloads/ and cross-compiled-pager-tools/.
+discover payloads/ and cross-compiled-pager-tools/. Hak5 payloads are
+fetched directly from GitHub at install time and do not require the
+Skinny-Tools repo to be present locally.
 EOF
     exit 0
     ;;
@@ -237,6 +255,40 @@ echo "[*] Initializing Live Git Online Installation Sequence..."
 echo "========================================================="
 
 # ==========================================
+# PHASE 0: Payload Source Selector (S/H/B)
+# ==========================================
+echo ""
+echo "Do you want to install:"
+echo "  [S] Skinny-Tools"
+echo "  [H] Hak5 Payloads"
+echo "  [B] Both"
+SELECTION=""
+while [ -z "$SELECTION" ]; do
+  printf "Choice [S/H/B]: "
+  read -r SELECTION
+  case "$SELECTION" in
+    [sS]) SELECTION="S" ;;
+    [hH]) SELECTION="H" ;;
+    [bB]) SELECTION="B" ;;
+    *)
+      echo "[-] Invalid choice. Please enter S, H, or B."
+      SELECTION=""
+      ;;
+  esac
+done
+echo "[+] Selected: $SELECTION"
+echo ""
+
+# Stage directories for tarballs fetched at runtime (Hak5 and Skinny-Tools).
+# Initialized empty; each phase that creates a stage dir will overwrite its
+# variable, and the EXIT trap will clean whatever was created.
+HAK5_STAGE=""
+SKINNY_STAGE=""
+# Trap cleans any staged dirs on every exit path so /tmp doesn't accumulate
+# cruft on the Pager. rm -rf on empty vars is a harmless no-op.
+trap 'rm -rf "$HAK5_STAGE" "$SKINNY_STAGE" 2>/dev/null' EXIT
+
+# ==========================================
 # PHASE 1: Internet Connectivity Check
 # ==========================================
 echo "[*] Checking live WAN internet link via Google DNS..."
@@ -250,8 +302,169 @@ else
 fi
 
 # ==========================================
+# PHASE 1A: Hak5 Payload Library Fetch (H or B only)
+# ==========================================
+# Pulls github.com/hak5/wifipineapplepager-payloads and merges the contents
+# of its library/ tree (alerts/, recon/, user/) into the Pager's payload
+# destination. Strictly no-clobber: payloads already on the Pager are
+# skipped, nothing is ever removed or overwritten.
+# ==========================================
+if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
+  echo "[*] Fetching Hak5 payload library from github.com/hak5/wifipineapplepager-payloads..."
+
+  HAK5_TARBALL_URL="https://github.com/hak5/wifipineapplepager-payloads/archive/refs/heads/master.tar.gz"
+  HAK5_STAGE="$(mktemp -d -t hak5-payloads.XXXXXX)"
+
+  # wget is the Pager's default fetcher; fall back to curl if missing.
+  if command -v wget >/dev/null 2>&1; then
+    if ! wget -qO "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
+      echo "[-] Critical Error: wget failed to download Hak5 tarball."
+      exit 1
+    fi
+  elif command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
+      echo "[-] Critical Error: curl failed to download Hak5 tarball."
+      exit 1
+    fi
+  else
+    echo "[-] Critical Error: neither wget nor curl is available on this Pager."
+    exit 1
+  fi
+
+  if ! tar -xzf "$HAK5_STAGE/hak5.tar.gz" -C "$HAK5_STAGE" 2>/dev/null; then
+    echo "[-] Critical Error: tar failed to extract Hak5 tarball."
+    exit 1
+  fi
+
+  HAK5_SRC="$HAK5_STAGE/wifipineapplepager-payloads-master/library"
+  if [ ! -d "$HAK5_SRC" ]; then
+    echo "[-] Critical Error: expected library/ folder missing in Hak5 tarball."
+    exit 1
+  fi
+
+  mkdir -p "$SYSTEM_PAYLOADS_DEST"
+
+  HAK5_NEW=0
+  HAK5_PRESENT=0
+  HAK5_FAILED=""
+  # Hak5's payload convention: library/<tree>/<payload-folder>/payload.sh
+  # We mirror one folder deep per payload - matches how the Pager UI
+  # expects to find each payload on disk.
+  for tree in alerts recon user; do
+    src_tree="$HAK5_SRC/$tree"
+    [ -d "$src_tree" ] || continue
+    for entry in "$src_tree"/*; do
+      [ -d "$entry" ] || continue
+      name="$(basename "$entry")"
+      dst="$SYSTEM_PAYLOADS_DEST/$tree/$name"
+      if [ -d "$dst" ]; then
+        # Already on the Pager - never touch it (no-clobber).
+        HAK5_PRESENT=$((HAK5_PRESENT + 1))
+      else
+        mkdir -p "$dst"
+        # Fresh copy. cp -r of the folder contents into the empty dest -
+        # safe because we just verified $dst doesn't exist.
+        if cp -r "$entry/." "$dst/" 2>/dev/null; then
+          HAK5_NEW=$((HAK5_NEW + 1))
+          echo "[NEW PAYLOAD] $tree/$name"
+        else
+          HAK5_FAILED="$HAK5_FAILED $tree/$name"
+          rm -rf "$dst"
+        fi
+      fi
+    done
+  done
+
+  # Ensure any launcher scripts Hak5 ships with executable bit set.
+  for tree in alerts recon user; do
+    if [ -d "$SYSTEM_PAYLOADS_DEST/$tree" ]; then
+      find "$SYSTEM_PAYLOADS_DEST/$tree" -name "*.sh" -exec chmod +x {} \; 2>/dev/null
+    fi
+  done
+
+  echo "[*] Hak5 payload summary: $HAK5_NEW new, $HAK5_PRESENT already present."
+  if [ -n "$HAK5_FAILED" ]; then
+    echo "[!] WARNING: failed to copy Hak5 payloads:$HAK5_FAILED"
+  fi
+  echo "[+] Hak5 payload library merged into $SYSTEM_PAYLOADS_DEST/"
+fi
+
+# ==========================================
+# PHASE 1B: Skinny-Tools Repo Auto-Fetch (S/B only)
+# ==========================================
+# If the script was launched from a folder that doesn't contain the full
+# Skinny-Tools repo (e.g. the user only downloaded online-install.sh from
+# GitHub in their browser), fetch the tarball so Phase 3-5 have payloads/,
+# cross-compiled-pager-tools/, pagerctl.py, and libpagerctl.so to work
+# with. A local clone is always preferred when present so existing users
+# running 'git pull && ./online-install.sh' see no behavior change.
+# ==========================================
+if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
+  NEEDS_FETCH=0
+  # payloads/ is the most critical - Phase 4 errors out without it.
+  [ -d "$LOCAL_PAYLOADS_DIR" ] || NEEDS_FETCH=1
+  # cross-compiled-pager-tools/ - Phase 3 just warns and skips without it,
+  # but rtl_433 / ubertooth-utils won't install if missing.
+  [ -d "$CROSS_TOOLS_DIR" ] || NEEDS_FETCH=1
+  # pagerctl.py + libpagerctl.so are required by Phase 5's symlink block.
+  if [ ! -f "$REPO_DIR/pagerctl.py" ] || [ ! -f "$REPO_DIR/libpagerctl.so" ]; then
+    NEEDS_FETCH=1
+  fi
+
+  if [ "$NEEDS_FETCH" = "1" ]; then
+    echo "[*] Local Skinny-Tools repo incomplete; fetching from github.com/skinnyrad/Skinny-Tools..."
+    SKINNY_TARBALL_URL="https://github.com/skinnyrad/Skinny-Tools/archive/refs/heads/master.tar.gz"
+    SKINNY_STAGE="$(mktemp -d -t skinny-tools.XXXXXX)"
+
+    if command -v wget >/dev/null 2>&1; then
+      if ! wget -qO "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL"; then
+        echo "[-] Critical Error: wget failed to download Skinny-Tools tarball."
+        exit 1
+      fi
+    elif command -v curl >/dev/null 2>&1; then
+      if ! curl -fsSL -o "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL"; then
+        echo "[-] Critical Error: curl failed to download Skinny-Tools tarball."
+        exit 1
+      fi
+    else
+      echo "[-] Critical Error: neither wget nor curl is available on this Pager."
+      exit 1
+    fi
+
+    if ! tar -xzf "$SKINNY_STAGE/skinny.tar.gz" -C "$SKINNY_STAGE" 2>/dev/null; then
+      echo "[-] Critical Error: tar failed to extract Skinny-Tools tarball."
+      exit 1
+    fi
+
+    # GitHub tarballs extract to <repo-name>-<branch>/ so the branch name is
+    # part of the path. master is the branch used by skinnyrad/Skinny-Tools.
+    SKINNY_SRC="$SKINNY_STAGE/Skinny-Tools-master"
+    if [ ! -d "$SKINNY_SRC/payloads" ]; then
+      # Fallback: discover whatever directory tar created (covers branch
+      # renames without requiring a script update).
+      SKINNY_SRC="$(find "$SKINNY_STAGE" -mindepth 1 -maxdepth 1 -type d ! -name '*.tar.gz' | head -n 1)"
+      if [ -z "$SKINNY_SRC" ] || [ ! -d "$SKINNY_SRC/payloads" ]; then
+        echo "[-] Critical Error: extracted Skinny-Tools repo is missing payloads/."
+        exit 1
+      fi
+    fi
+
+    REPO_DIR="$SKINNY_SRC"
+    LOCAL_PAYLOADS_DIR="$REPO_DIR/payloads"
+    CROSS_TOOLS_DIR="$REPO_DIR/cross-compiled-pager-tools"
+    echo "[+] Skinny-Tools repo staged from GitHub tarball."
+  else
+    echo "[*] Local Skinny-Tools repo detected; using $REPO_DIR"
+  fi
+fi
+
+# ==========================================
 # PHASE 2: Pre-flight Dependency Check
 # ==========================================
+# Skinny-Tools-specific phases (2 through 6) only run when S or B was
+# selected. Hak5 is just a payload pull, so it doesn't need python3,
+# airodump-ng, the cross-compiled tools, or the PagerCTL shims.
+if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
 echo "[*] Running pre-flight dependency check (tcpdump, aircrack-ng, python3)..."
 
 MISSING=""
@@ -478,3 +691,7 @@ if [ $? -eq 0 ]; then
 else
     echo "[-] Warning: Setup finished but the validation test returned an environment alert."
 fi
+fi
+
+# End of Skinny-Tools install block. Hak5-only runs (SELECTION=H) skip
+# everything inside the conditional above and exit cleanly here.
