@@ -16,9 +16,8 @@ Welcome to the official Skinny R&D payload and utility repository for the Hak5 W
 * **rtl_433_MIPS** - Write payloads to detect TPMS sensors and other RTL-SDR detections
   - Recommended hardware: rtl_sdr dongle plugged into USB-A 
 * **Ubertooth-MIPS** - Installs cross-compiled Ubertooth tools and libraries for use in Bluetooth payloads
-  - Recommended hardware: Ubertooth plugged into USB-A 
-
-
+  - Recommended hardware: Ubertooth plugged into USB-A
+* **Direct python output bypassing Pager UI** - Added python readouts to skip Pager UI. It seems to improve speed slightly for payloads that lag on UI readout. See brainphreak's repo at https://github.com/pineapple-pager-projects/pineapple_pager_pagerctl.
 
 
 ---
