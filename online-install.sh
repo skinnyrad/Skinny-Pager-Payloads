@@ -101,7 +101,7 @@ if [ "$MODE" = "uninstall" ]; then
   if [ ! -d "$CROSS_TOOLS_DIR" ]; then
     echo "[!] No cross-compiled-pager-tools/ directory in repo. Skipping."
   else
-    IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f 2>/dev/null | sort)
+    IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f ! -name "._*" 2>/dev/null | sort)
     if [ -z "$IPK_FILES" ]; then
       echo "[!] No .ipk files found in $CROSS_TOOLS_DIR. Skipping."
     else
@@ -322,6 +322,19 @@ merge_payload_category() {
   done
 }
 
+# count_missing_files: emits one line per file in $1 (src root) that does
+# not exist at the corresponding path under $2 (dst root), and prints the
+# total count on stdout. Used by Phase 4 to decide whether the per-file
+# no-clobber sync is necessary or can be skipped as a no-op.
+count_missing_files() {
+  src_root="$1"
+  dst_root="$2"
+  [ -d "$src_root" ] || { echo 0; return 0; }
+  ( cd "$src_root" && find . -type f ) | while IFS= read -r src; do
+    [ ! -e "$dst_root/$src" ] && echo x
+  done | wc -l
+}
+
 # ==========================================
 # PHASE 1: Internet Connectivity Check
 # ==========================================
@@ -342,38 +355,59 @@ fi
 # of its library/ tree (alerts/, recon/, user/) into the Pager's payload
 # destination. Strictly no-clobber: payloads already on the Pager are
 # skipped, nothing is ever removed or overwritten.
+#
+# Efficiency: the extracted library is cached at
+#   /mmc/root/.skinny-tools-cache/hak5-library/
+# so subsequent runs skip the GitHub download entirely and just diff the
+# cached manifest against the Pager's filesystem. Delete that directory to
+# force a fresh download.
 # ==========================================
 if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
-  echo "[*] Fetching Hak5 payload library from github.com/hak5/wifipineapplepager-payloads..."
+  HAK5_CACHE_ROOT="/mmc/root/.skinny-tools-cache"
+  HAK5_CACHE="$HAK5_CACHE_ROOT/hak5-library"
 
-  HAK5_TARBALL_URL="https://github.com/hak5/wifipineapplepager-payloads/archive/refs/heads/master.tar.gz"
-  HAK5_STAGE="$(mktemp -d -t hak5-payloads.XXXXXX)"
-
-  # wget is the Pager's default fetcher; fall back to curl if missing.
-  if command -v wget >/dev/null 2>&1; then
-    if ! wget -qO "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-      echo "[-] Critical Error: wget failed to download Hak5 tarball."
-      exit 1
-    fi
-  elif command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-      echo "[-] Critical Error: curl failed to download Hak5 tarball."
-      exit 1
-    fi
+  if [ -d "$HAK5_CACHE/alerts" ] && [ -d "$HAK5_CACHE/user" ] && [ -d "$HAK5_CACHE/recon" ]; then
+    echo "[*] Using cached Hak5 payload library at $HAK5_CACHE (delete to force refresh)"
+    HAK5_SRC="$HAK5_CACHE"
   else
-    echo "[-] Critical Error: neither wget nor curl is available on this Pager."
-    exit 1
-  fi
+    echo "[*] Fetching Hak5 payload library from github.com/hak5/wifipineapplepager-payloads..."
 
-  if ! tar -xzf "$HAK5_STAGE/hak5.tar.gz" -C "$HAK5_STAGE" 2>/dev/null; then
-    echo "[-] Critical Error: tar failed to extract Hak5 tarball."
-    exit 1
-  fi
+    HAK5_TARBALL_URL="https://github.com/hak5/wifipineapplepager-payloads/archive/refs/heads/master.tar.gz"
+    HAK5_STAGE="$(mktemp -d -t hak5-payloads.XXXXXX)"
 
-  HAK5_SRC="$HAK5_STAGE/wifipineapplepager-payloads-master/library"
-  if [ ! -d "$HAK5_SRC" ]; then
-    echo "[-] Critical Error: expected library/ folder missing in Hak5 tarball."
-    exit 1
+    # wget is the Pager's default fetcher; fall back to curl if missing.
+    if command -v wget >/dev/null 2>&1; then
+      if ! wget -qO "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
+        echo "[-] Critical Error: wget failed to download Hak5 tarball."
+        exit 1
+      fi
+    elif command -v curl >/dev/null 2>&1; then
+      if ! curl -fsSL -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
+        echo "[-] Critical Error: curl failed to download Hak5 tarball."
+        exit 1
+      fi
+    else
+      echo "[-] Critical Error: neither wget nor curl is available on this Pager."
+      exit 1
+    fi
+
+    if ! tar -xzf "$HAK5_STAGE/hak5.tar.gz" -C "$HAK5_STAGE" 2>/dev/null; then
+      echo "[-] Critical Error: tar failed to extract Hak5 tarball."
+      exit 1
+    fi
+
+    HAK5_SRC="$HAK5_STAGE/wifipineapplepager-payloads-master/library"
+    if [ ! -d "$HAK5_SRC" ]; then
+      echo "[-] Critical Error: expected library/ folder missing in Hak5 tarball."
+      exit 1
+    fi
+
+    # Persist the extracted library to /mmc so future runs skip the download.
+    mkdir -p "$HAK5_CACHE_ROOT"
+    rm -rf "$HAK5_CACHE"
+    cp -r "$HAK5_SRC" "$HAK5_CACHE"
+    HAK5_SRC="$HAK5_CACHE"
+    echo "[+] Hak5 library cached at $HAK5_CACHE for future runs."
   fi
 
   mkdir -p "$SYSTEM_PAYLOADS_DEST"
@@ -385,19 +419,27 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
   MERGE_PRESENT_LABELS=""
   MERGE_FAILED_LABELS=""
 
-  # Hak5's library/ tree is mostly flat (alerts/, user/) but the recon/
-  # subtree nests payloads two levels deep: library/recon/<subtree>/<payload>.
-  # The Pager ships empty skeleton folders at /mmc/root/payloads/recon/<subtree>/
-  # by default, so a single one-level walk over library/recon/* would only see
-  # the subtree roots and incorrectly mark every recon payload as "already
-  # present". Two passes - flat then nested - keep the recursion explicit.
-  for tree in alerts user; do
-    merge_payload_category "$HAK5_SRC/$tree" "$SYSTEM_PAYLOADS_DEST/$tree" "$tree"
-  done
+  # Hak5's library/ tree mixes flat and nested layouts:
+  #   - alerts/, recon/<subtree>/ - payloads are direct children
+  #   - user/ - payloads are NESTED inside factory folder names:
+  #       library/user/<factory>/<payload>/payload.sh
+  # The Pager ships empty factory folders under user/ (general, evil_portal,
+  # examples, ...). A one-level walk over library/user/* would see those
+  # factory roots as already-present on the Pager and silently skip every
+  # payload inside them. Walk each factory folder individually so the helper
+  # descends into the actual payload directories.
+  merge_payload_category "$HAK5_SRC/alerts" "$SYSTEM_PAYLOADS_DEST/alerts" "alerts"
   for subtree in access_point client; do
     merge_payload_category "$HAK5_SRC/recon/$subtree" \
                            "$SYSTEM_PAYLOADS_DEST/recon/$subtree" \
                            "recon/$subtree"
+  done
+  for factory_dir in "$HAK5_SRC/user"/*; do
+    [ -d "$factory_dir" ] || continue
+    factory_name="$(basename "$factory_dir")"
+    merge_payload_category "$factory_dir" \
+                           "$SYSTEM_PAYLOADS_DEST/user/$factory_name" \
+                           "user/$factory_name"
   done
 
   HAK5_NEW=$(echo "$MERGE_NEW_LABELS" | wc -w)
@@ -574,6 +616,8 @@ $ipk" ;;
     TOOLS=$(echo "$TOOLS" | sed '/^$/d')
 
     FAILED=""
+    INSTALLED=0
+    ALREADY_PRESENT=0
 
     install_ipk_batch() {
       label="$1"
@@ -582,6 +626,16 @@ $ipk" ;;
       echo "[*] Installing $label .ipk file(s)..."
       for ipk in $files; do
         rel="${ipk#$REPO_DIR/}"
+        # Derive the opkg package name (same parsing as the uninstall path
+        # in --uninstall) so we can pre-check installed state via opkg and
+        # avoid re-running opkg install for packages that are already
+        # current. opkg install is fast on a hit but skips cleanly here.
+        pkg=$(basename "$ipk" .ipk | sed 's/_[0-9][^_]*_mipsel.*$//')
+        if opkg list-installed 2>/dev/null | grep -q "^${pkg} "; then
+          echo "    [skip] $rel (already installed: $pkg)"
+          ALREADY_PRESENT=$((ALREADY_PRESENT + 1))
+          continue
+        fi
         echo "    -> $rel"
         # Capture opkg output and exit code separately so we can flag failures
         OPKG_OUT=$(opkg install "$ipk" 2>&1)
@@ -590,6 +644,8 @@ $ipk" ;;
         if [ "$OPKG_RC" -ne 0 ]; then
           echo "       [ERROR] opkg install returned non-zero for $rel"
           FAILED="$FAILED $rel"
+        else
+          INSTALLED=$((INSTALLED + 1))
         fi
       done
     }
@@ -597,9 +653,12 @@ $ipk" ;;
     install_ipk_batch "library" "$LIBS"
     install_ipk_batch "tool"    "$TOOLS"
 
+    echo "[*] .ipk install summary: $INSTALLED installed, $ALREADY_PRESENT already present."
     if [ -n "$FAILED" ]; then
       echo "[!] WARNING: the following .ipk(s) failed to install:$FAILED"
       echo "    The script will continue, but the affected tools may not work."
+    elif [ "$INSTALLED" = "0" ] && [ "$ALREADY_PRESENT" -gt 0 ]; then
+      echo "[+] All .ipk packages already installed; nothing to do."
     else
       echo "[+] All .ipk packages installed successfully."
     fi
@@ -612,64 +671,70 @@ fi
 echo "[*] Syncing custom security payloads to local hardware storage..."
 
 if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
-    # Snapshot the destination's Skinny-Tools / utilities trees BEFORE the copy
-    # so we can detect which payload directories are brand-new on this run.
-    # The per-subdir check works whether or not the destination parent exists
-    # yet -- if the parent is missing, every subdir counts as new.
-    NEW_PAYLOADS=""
-    PRESENT_PAYLOADS=""
+    MERGE_NEW_LABELS=""
+    MERGE_PRESENT_LABELS=""
+    MERGE_FAILED_LABELS=""
+
+    # Flat Skinny-Tools user categories.
     for tree in Skinny-Tools utilities; do
-      src="$LOCAL_PAYLOADS_DIR/user/$tree"
-      [ -d "$src" ] || continue
-      for entry in "$src"/*; do
-        [ -d "$entry" ] || continue
-        name="$(basename "$entry")"
-        if [ ! -d "$SYSTEM_PAYLOADS_DEST/user/$tree/$name" ]; then
-          NEW_PAYLOADS="$NEW_PAYLOADS user/$tree/$name"
-        else
-          PRESENT_PAYLOADS="$PRESENT_PAYLOADS user/$tree/$name"
-        fi
-      done
+      merge_payload_category "$LOCAL_PAYLOADS_DIR/user/$tree" \
+                             "$SYSTEM_PAYLOADS_DEST/user/$tree" \
+                             "user/$tree"
     done
 
-    mkdir -p "$SYSTEM_PAYLOADS_DEST"
-    # Portable "cp -rn" equivalent that actually descends into pre-existing
-    # destination directories. BusyBox's cp -n skips the whole copy when the
-    # destination dir already exists, which would silently break re-runs.
-    # This loop creates all source directories in the destination (mkdir -p
-    # is a no-op when they exist) and then copies only files that aren't
-    # already present, preserving any local tweaks to existing files.
-    ( cd "$LOCAL_PAYLOADS_DIR" && find . -type d -exec mkdir -p "$SYSTEM_PAYLOADS_DEST/{}" \; )
-    ( cd "$LOCAL_PAYLOADS_DIR" && find . -type f | while IFS= read -r src; do
-        dst="$SYSTEM_PAYLOADS_DEST/$src"
-        if [ ! -e "$dst" ]; then
-          mkdir -p "$(dirname "$dst")"
-          cp "$src" "$dst"
-        fi
-      done )
-    # Enforce global executable permissions across launcher scripts
-    find "$SYSTEM_PAYLOADS_DEST" -name "*.sh" -exec chmod +x {} \;
-    echo "[+] Payloads successfully synced to $SYSTEM_PAYLOADS_DEST/"
+    # Nested Skinny-Tools recon subtrees. Mirrors the Pager's default
+    # layout where /mmc/root/payloads/recon/access_point/ and .../client/
+    # exist as factory skeleton folders, with payload dirs inside them.
+    for tree in access_point client; do
+      merge_payload_category "$LOCAL_PAYLOADS_DIR/recon/$tree" \
+                             "$SYSTEM_PAYLOADS_DEST/recon/$tree" \
+                             "recon/$tree"
+    done
 
-    # Verify the two required custom folder landing zones exist on disk
+    NEW_PAYLOADS="$MERGE_NEW_LABELS"
+    PRESENT_PAYLOADS="$MERGE_PRESENT_LABELS"
+
+    mkdir -p "$SYSTEM_PAYLOADS_DEST"
+    # Pre-check: count any files in the local repo that aren't on the Pager.
+    # If everything's already present (re-run case), skip the per-file sync
+    # block as a no-op rather than iterating every file just to confirm.
+    MISSING_COUNT=$(count_missing_files "$LOCAL_PAYLOADS_DIR" "$SYSTEM_PAYLOADS_DEST")
+    if [ "$MISSING_COUNT" = "0" ]; then
+      echo "[*] All Skinny-Tools payload files already present on Pager; per-file sync skipped."
+    else
+      # Portable "cp -rn" equivalent that actually descends into pre-existing
+      # destination directories. BusyBox's cp -n skips the whole copy when the
+      # destination dir already exists, which would silently break re-runs.
+      # This loop creates all source directories in the destination (mkdir -p
+      # is a no-op when they exist) and then copies only files that aren't
+      # already present, preserving any local tweaks to existing files.
+      ( cd "$LOCAL_PAYLOADS_DIR" && find . -type d -exec mkdir -p "$SYSTEM_PAYLOADS_DEST/{}" \; )
+      ( cd "$LOCAL_PAYLOADS_DIR" && find . -type f | while IFS= read -r src; do
+          dst="$SYSTEM_PAYLOADS_DEST/$src"
+          if [ ! -e "$dst" ]; then
+            mkdir -p "$(dirname "$dst")"
+            cp "$src" "$dst"
+          fi
+        done )
+      # Enforce global executable permissions across launcher scripts
+      find "$SYSTEM_PAYLOADS_DEST" -name "*.sh" -exec chmod +x {} \;
+      echo "[+] Payloads successfully synced to $SYSTEM_PAYLOADS_DEST/"
+    fi
+
+    # Verify the two required custom folder landing zones exist on disk.
+    # The recon/<subtree> skeletons always exist (factory default) so we
+    # don't need to verify them here - they were just populated by the
+    # helper calls above.
     for required in Skinny-Tools utilities; do
       if [ ! -d "$SYSTEM_PAYLOADS_DEST/user/$required" ]; then
         echo "[-] Critical Error: required payload folder missing: $SYSTEM_PAYLOADS_DEST/user/$required"
         exit 1
       fi
     done
-    echo "[+] Verified: payloads/user/Skinny-Tools and payloads/user/utilities are in place."
+    echo "[+] Verified: payloads/user/Skinny-Tools, payloads/user/utilities, payloads/recon/access_point, payloads/recon/client are in place."
 
-    # Report new vs. existing payload directories detected pre-copy
-    NEW_COUNT=0
-    for p in $NEW_PAYLOADS; do
-      echo "[NEW PAYLOAD] $p"
-      NEW_COUNT=$((NEW_COUNT + 1))
-    done
-    PRESENT_COUNT=0
-    for p in $PRESENT_PAYLOADS; do
-      PRESENT_COUNT=$((PRESENT_COUNT + 1))
-    done
+    NEW_COUNT=$(echo "$NEW_PAYLOADS" | wc -w)
+    PRESENT_COUNT=$(echo "$PRESENT_PAYLOADS" | wc -w)
     echo "[*] Payload summary: $NEW_COUNT new sub-payload(s), $PRESENT_COUNT existing."
 else
     echo "[-] Error: 'payloads' folder missing from the cloned Git repository!"
