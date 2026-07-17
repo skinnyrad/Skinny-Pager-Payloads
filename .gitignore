@@ -3,3 +3,5 @@ dep_packages/
 offline_install.sh
 payloads/user/utilities/PAGERCTL/__pycache__
 .DS_Store
+knowledge
+
