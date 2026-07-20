@@ -139,48 +139,66 @@ sleep 1
 echo "[+] Streaming raw kernel Bluetooth events..."
 
 current_type="UNKNOWN"
+event_mac=""
+event_match_line=""
 
-# Process substitution <(...) guarantees execution stays inside the main thread
-while IFS= read -r line; do
-    
-    if [[ "$line" =~ "LE Advertising Report" || "$line" =~ "HCI Event: LE" ]]; then
-        current_type="BLE"
-    elif [[ "$line" =~ "Inquiry Result" || "$line" =~ "Extended Inquiry Result" || "$line" =~ "HCI Event: Connect Request" ]]; then
-        current_type="CLASSIC"
+handle_detection() {
+    local match_line=$1
+    local bt_mac=$2
+    local current_time=$(date +%s)
+
+    if [ -n "${SEEN_DEVICES[$bt_mac]}" ]; then
+        if [ $((current_time - ${SEEN_DEVICES[$bt_mac]})) -lt 15 ]; then
+            return
+        fi
     fi
-    
-    if [[ "$line" =~ $RAW_GREP_PATTERN || "$line" =~ ([0-9A-F]{2}:){5}[0-9A-F]{2} ]]; then
-        
-        clean_line=$(echo "$line" | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+
+    SEEN_DEVICES[$bt_mac]=$current_time
+    killall -9 hcitool 2>/dev/null
+    trigger_pager_alert "$match_line"
+    hciconfig hci0 piscan 2>/dev/null
+    hcitool lescan --duplicates > /dev/null 2>&1 &
+    hcitool scan > /dev/null 2>&1 &
+}
+
+while IFS= read -r line; do
+    if [[ "$line" =~ "LE Extended Advertising Report" || "$line" =~ "LE Advertising Report" ]]; then
+        current_type="BLE"
+        event_mac=""
+        event_match_line=""
+    elif [[ "$line" =~ "HCI Event: LE" ]]; then
+        current_type="BLE"
+        event_mac=""
+        event_match_line=""
+    elif [[ "$line" =~ "Inquiry Result" || "$line" =~ "Extended Inquiry Result" || "$line" =~ "HCI Event: Connect Request" || "$line" =~ "Remote Name Request Complete" ]]; then
+        current_type="CLASSIC"
+        event_mac=""
+        event_match_line=""
+    fi
+
+    clean_line=$(echo "$line" | tr -d '\r\n' | sed 's/[[:space:]]\+/ /g')
+    line_mac=""
+    if [[ "$clean_line" =~ ([0-9A-F]{2}:){5}[0-9A-F]{2} ]]; then
+        line_mac="${BASH_REMATCH[0]}"
+        line_mac=$(echo "$line_mac" | tr '[:lower:]' '[:upper:]')
+        event_mac="$line_mac"
+    fi
+
+    if [[ "$clean_line" =~ $RAW_GREP_PATTERN ]]; then
+        event_match_line="$clean_line"
+    fi
+
+    if [ -n "$line_mac" ] || [[ "$clean_line" =~ $RAW_GREP_PATTERN ]]; then
         tagged_line="[$current_type] $clean_line"
         echo "$tagged_line"
+    fi
 
-        if [[ "$clean_line" =~ $RAW_GREP_PATTERN ]]; then
-            if [[ "$clean_line" =~ ([0-9A-F]{2}:){5}[0-9A-F]{2} ]]; then
-                bt_mac="${BASH_REMATCH[0]}"
-                bt_mac=$(echo "$bt_mac" | tr '[:lower:]' '[:upper:]')
-                current_time=$(date +%s)
-
-                if [ -n "${SEEN_DEVICES[$bt_mac]}" ]; then
-                    if [ $((current_time - ${SEEN_DEVICES[$bt_mac]})) -lt 15 ]; then
-                        continue
-                    fi
-                fi
-
-                # Log the device time
-                SEEN_DEVICES[$bt_mac]=$current_time
-                
-                # Stop background scanning completely while user interacts with screen
-                killall -9 hcitool 2>/dev/null
-                
-                # Trigger screen alert
-                trigger_pager_alert "$tagged_line"
-                
-                # Verify script hasn't been killed before restarting engines
-                hciconfig hci0 piscan 2>/dev/null 
-                hcitool lescan --duplicates > /dev/null 2>&1 &
-                hcitool scan > /dev/null 2>&1 &
-            fi
+    if [ -n "$event_mac" ] && [ -n "$event_match_line" ]; then
+        match_line="[$current_type] $event_match_line"
+        if [[ "$event_match_line" != *"$event_mac"* ]]; then
+            match_line="$match_line | Address: $event_mac"
         fi
+        handle_detection "$match_line" "$event_mac"
+        event_match_line=""
     fi
 done < <(btmon)
