@@ -4,4 +4,13 @@ offline_install.sh
 payloads/user/utilities/PAGERCTL/__pycache__
 .DS_Store
 knowledge
-
+payloads/user/Skinny-Tools/att
+cross-compiled-pager-tools/wpad-wolfssl/
+payloads/user/Skinny-Tools/ATT-Both/
+payloads/user/Skinny-Tools/ATT-Connection/
+payloads/user/Skinny-Tools/ATT-Dryrun/
+payloads/user/Skinny-Tools/ATT-Hybrid/
+payloads/user/Skinny-Tools/ATT-Pseudonym/
+payloads/user/Skinny-Tools/ATT-Revert/
+payloads/user/Skinny-Tools/ATT-Status/
+payloads/user/Skinny-Tools/ATT-Stop/
