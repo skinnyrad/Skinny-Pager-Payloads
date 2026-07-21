@@ -311,8 +311,8 @@ echo "========================================================="
 if [ -z "$SELECTION" ]; then
   echo ""
   echo "Do you want to install:"
-  echo "  [S] Skinny-Tools"
-  echo "  [H] Hak5 Payloads"
+  echo "  [S] Skinny Pager Payloads"
+  echo "  [H] Hak5 Pager Payloads"
   echo "  [B] Both"
   while [ -z "$SELECTION" ]; do
     printf "Choice [S/H/B]: "
