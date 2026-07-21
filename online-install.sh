@@ -8,10 +8,18 @@
 #   1A. Hak5 payload pull (H or B only) - fetches
 #         github.com/hak5/wifipineapplepager-payloads/library and merges
 #         new payload folders into /mmc/root/payloads/ (no-clobber)
-#   1B. Skinny-Tools repo auto-fetch (S or B only) - if a full local clone
-#         isn't next to the script, fetches the GitHub tarball so Phase 3-5
-#         have payloads/, cross-compiled-pager-tools/, pagerctl.{py,so} to
-#         work with. Existing users with a full clone see no behavior change.
+#   1B. Skinny-Tools source resolution (S or B only) - ALWAYS fetches the
+#         latest from github.com/skinnyrad/Skinny-Pager-Payloads so Phase
+#         3-5 operate on upstream HEAD, not on a possibly-stale local
+#         clone. The fetched content is cached at
+#         /mmc/root/.skinny-tools-cache/skinny-tools/ and refreshed on
+#         every successful run. Fallbacks in order: cached snapshot,
+#         then the local clone at $REPO_DIR (only if both the GitHub
+#         fetch and the cache are unavailable, e.g. truly offline).
+#         This means users who only downloaded online-install.sh (no
+#         local clone) get the same updates as users who maintain a
+#         full clone - and they no longer have to remember to
+#         `git pull` between runs.
 #   2.  Pre-flight dependency check (tcpdump, aircrack-ng, python3)  [S/B only]
 #   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/  [S/B only]
 #   4.  Payload tree mirror with new-payload detection  [S/B only]
@@ -28,11 +36,12 @@
 # Argument Parsing
 # ==========================================
 MODE="install"
+SELECTION=""
 case "${1:-}" in
   --uninstall|-u) MODE="uninstall" ;;
   --help|-h)
     cat <<EOF
-Usage: $0 [--uninstall] [--help]
+Usage: $0 [--uninstall] [--help] [--select S|H|B] [S|H|B]
 
 Default (no flag):  Interactive prompt asks which payload sources to pull:
                       [S] Skinny-Tools (full install/update, identical to
@@ -51,6 +60,11 @@ Default (no flag):  Interactive prompt asks which payload sources to pull:
                    (python3, aircrack-ng, tcpdump, etc.) are NOT removed;
                    the summary lists the manual command to remove them
                    if a full factory reset is desired.
+  --select S|H|B:    Non-interactive mode: skip the prompt and use the
+                   given selection directly. Accepts "--select S",
+                   "--select=S", or just "S" as a positional argument.
+                   Used by the Skinny-Pager-Payload-Updater Pager-UI
+                   menu payload so the menu always tracks this script.
 --help, -h:        Show this help.
 
 Run from inside the cloned Skinny-Tools repository so the script can
@@ -59,6 +73,43 @@ fetched directly from GitHub at install time and do not require the
 Skinny-Tools repo to be present locally.
 EOF
     exit 0
+    ;;
+  --select)
+    # --select S (space-separated): consume the value as $2.
+    SELECTION="$2"
+    shift 2
+    # Validate now so callers fail fast with a clear error.
+    case "$SELECTION" in
+      [sS]) SELECTION="S" ;;
+      [hH]) SELECTION="H" ;;
+      [bB]) SELECTION="B" ;;
+      *)
+        echo "[-] --select requires S, H, or B (got: $SELECTION)"
+        exit 1
+        ;;
+    esac
+    ;;
+  --select=*)
+    SELECTION="${1#--select=}"
+    case "$SELECTION" in
+      [sS]) SELECTION="S" ;;
+      [hH]) SELECTION="H" ;;
+      [bB]) SELECTION="B" ;;
+      *)
+        echo "[-] --select requires S, H, or B (got: $SELECTION)"
+        exit 1
+        ;;
+    esac
+    shift
+    ;;
+  [sShHbB])
+    # Positional: "$0 S" or "$0 H" or "$0 B" (case-insensitive).
+    case "$1" in
+      [sS]) SELECTION="S" ;;
+      [hH]) SELECTION="H" ;;
+      [bB]) SELECTION="B" ;;
+    esac
+    shift
     ;;
   "") MODE="install" ;;
   *)
@@ -257,71 +308,107 @@ echo "========================================================="
 # ==========================================
 # PHASE 0: Payload Source Selector (S/H/B)
 # ==========================================
-echo ""
-echo "Do you want to install:"
-echo "  [S] Skinny-Tools"
-echo "  [H] Hak5 Payloads"
-echo "  [B] Both"
-SELECTION=""
-while [ -z "$SELECTION" ]; do
-  printf "Choice [S/H/B]: "
-  read -r SELECTION
-  case "$SELECTION" in
-    [sS]) SELECTION="S" ;;
-    [hH]) SELECTION="H" ;;
-    [bB]) SELECTION="B" ;;
-    *)
-      echo "[-] Invalid choice. Please enter S, H, or B."
-      SELECTION=""
-      ;;
-  esac
-done
-echo "[+] Selected: $SELECTION"
-echo ""
+if [ -z "$SELECTION" ]; then
+  echo ""
+  echo "Do you want to install:"
+  echo "  [S] Skinny-Tools"
+  echo "  [H] Hak5 Payloads"
+  echo "  [B] Both"
+  while [ -z "$SELECTION" ]; do
+    printf "Choice [S/H/B]: "
+    read -r SELECTION
+    case "$SELECTION" in
+      [sS]) SELECTION="S" ;;
+      [hH]) SELECTION="H" ;;
+      [bB]) SELECTION="B" ;;
+      *)
+        echo "[-] Invalid choice. Please enter S, H, or B."
+        SELECTION=""
+        ;;
+    esac
+  done
+  echo "[+] Selected: $SELECTION"
+  echo ""
+else
+  # Non-interactive mode: --select (or positional S/H/B) was supplied.
+  echo "[+] Selected: $SELECTION (non-interactive)"
+  echo ""
+fi
 
 # Stage directories for tarballs fetched at runtime (Hak5 and Skinny-Tools).
 # Initialized empty; each phase that creates a stage dir will overwrite its
 # variable, and the EXIT trap will clean whatever was created.
 HAK5_STAGE=""
 SKINNY_STAGE=""
+# MERGE_TMP is created lazily by merge_payload_category() the first time
+# a payload is processed; the EXIT trap cleans it like the stage dirs.
+MERGE_TMP=""
 # Trap cleans any staged dirs on every exit path so /tmp doesn't accumulate
 # cruft on the Pager. rm -rf on empty vars is a harmless no-op.
-trap 'rm -rf "$HAK5_STAGE" "$SKINNY_STAGE" 2>/dev/null' EXIT
+trap 'rm -rf "$HAK5_STAGE" "$SKINNY_STAGE" "$MERGE_TMP" 2>/dev/null' EXIT
 
 # Shared helper for payload tree-walking. Used by both Phase 1A (Hak5 fetch)
 # and Phase 4 (Skinny-Tools mirror) so the two phases cannot drift in their
 # iteration logic. For each payload subdir under $1 (src), installs it into
-# $2 (dst root) using two-tier no-clobber semantics:
+# $2 (dst root) using three-tier semantics:
 #   - If the destination subdir doesn't exist: create it and copy the entire
 #     payload contents (fresh install). Logs "[NEW PAYLOAD] <label>/<name>".
-#   - If the destination subdir already exists: leave it in place but descend
-#     into it and copy any individual FILES that are missing. The Pager ships
-#     empty placeholder folders at /mmc/root/payloads/{alerts,recon/<subtree>,
-#     user/<factory>}/<payload>/ that need to be populated with Hak5's files
-#     on first run; existing files at the destination are preserved so local
-#     user tweaks to e.g. payload.sh survive re-runs. Logs
-#     "[NEW FILE] <label>/<name>/<relpath>" for each file copied.
-# Updates the MERGE_NEW_LABELS, MERGE_PRESENT_LABELS, and MERGE_FAILED_LABELS
-# globals (space-separated "<label>/<name>" strings for whole-payload rows).
+#   - If the destination subdir already exists: descend into it and for each
+#     file compare content via sha256. Three sub-cases:
+#       * File missing on dest: copy it. Logs
+#         "[NEW FILE] <label>/<name>/<relpath>". The Pager ships empty
+#         placeholder folders at /mmc/root/payloads/{alerts,recon/<subtree>,
+#         user/<factory>}/<payload>/ that need to be populated with upstream
+#         files on first run.
+#       * File present but hash differs: overwrite with the upstream copy
+#         (your latest repo push is the source of truth). Logs
+#         "[UPDATED FILE] <label>/<name>/<relpath>".
+#       * File present and hash matches: skip silently. Local tweaks are
+#         preserved only as long as the upstream file content doesn't change.
+#     If any file in the payload was added or changed, the whole label is
+#     also logged once as "[UPDATED PAYLOAD] <label>/<name>".
+# Updates the MERGE_NEW_LABELS, MERGE_UPDATED_LABELS, MERGE_PRESENT_LABELS,
+# and MERGE_FAILED_LABELS globals (space-separated "<label>/<name>" strings
+# for whole-payload rows; NEW, UPDATED, and PRESENT are mutually exclusive).
 merge_payload_category() {
   src="$1"
   dst_root="$2"
   label="$3"
   [ -d "$src" ] || return 0
+  # Lazily create a shared scratch dir for the per-payload updated flag.
+  # The per-file loop below runs in a subshell so shell variables can't
+  # escape it; we instead record "this payload had at least one change"
+  # in a sentinel file under $MERGE_TMP that the parent shell inspects.
+  if [ -z "$MERGE_TMP" ] || [ ! -d "$MERGE_TMP" ]; then
+    MERGE_TMP="$(mktemp -d -t skinny-merge.XXXXXX)"
+  fi
   for entry in "$src"/*; do
     [ -d "$entry" ] || continue
     name="$(basename "$entry")"
     full_label="$label/$name"
     dst="$dst_root/$name"
     if [ -d "$dst" ]; then
-      MERGE_PRESENT_LABELS="${MERGE_PRESENT_LABELS}${MERGE_PRESENT_LABELS:+ }$full_label"
+      flag="$MERGE_TMP/$name.updated"
+      : > "$flag"
       ( cd "$entry" && find . -type f ) | while IFS= read -r f; do
         if [ ! -e "$dst/$f" ]; then
           mkdir -p "$dst/$(dirname "$f")"
           cp "$entry/$f" "$dst/$f"
           echo "[NEW FILE] $full_label/$f"
+          echo x >> "$flag"
+        elif [ "$(sha256_file "$entry/$f")" != "$(sha256_file "$dst/$f")" ]; then
+          cp "$entry/$f" "$dst/$f"
+          echo "[UPDATED FILE] $full_label/$f"
+          echo x >> "$flag"
         fi
       done
+      if [ -s "$flag" ]; then
+        MERGE_UPDATED_LABELS="${MERGE_UPDATED_LABELS}${MERGE_UPDATED_LABELS:+ }$full_label"
+        echo "[UPDATED PAYLOAD] $full_label"
+      else
+        MERGE_PRESENT_LABELS="${MERGE_PRESENT_LABELS}${MERGE_PRESENT_LABELS:+ }$full_label"
+      fi
+      rm -f "$flag"
     else
       mkdir -p "$dst"
       if cp -r "$entry/." "$dst/" 2>/dev/null; then
@@ -335,6 +422,14 @@ merge_payload_category() {
   done
 }
 
+# sha256_file: print the sha256 of a single file's contents. sha256sum ships
+# in BusyBox on OpenWrt (including the Hak5 Pager), so no fallback is needed.
+# If the file is unreadable or missing, the empty string is returned and any
+# caller's hash comparison will naturally treat it as a mismatch.
+sha256_file() {
+  sha256sum "$1" 2>/dev/null | awk '{print $1}'
+}
+
 # count_missing_files: emits one line per file in $1 (src root) that does
 # not exist at the corresponding path under $2 (dst root), and prints the
 # total count on stdout. Used by Phase 4 to decide whether the per-file
@@ -343,8 +438,38 @@ count_missing_files() {
   src_root="$1"
   dst_root="$2"
   [ -d "$src_root" ] || { echo 0; return 0; }
-  ( cd "$src_root" && find . -type f ) | while IFS= read -r src; do
-    [ ! -e "$dst_root/$src" ] && echo x
+  # Strip a trailing slash so the prefix-strip below produces a clean
+  # relative path (avoids "//foo" after substitution).
+  src_root="${src_root%/}"
+  # Use `find $src_root` rather than `cd $src_root && find .` so the
+  # emitted paths are absolute and remain resolvable in the parent shell
+  # after the pipeline fork. A subshell `cd` would leave the parent in
+  # its original CWD, making the relative "./foo" paths unresolvable
+  # by sha256_file below.
+  find "$src_root" -type f | while IFS= read -r src; do
+    rel="${src#"$src_root"/}"
+    [ ! -e "$dst_root/$rel" ] && echo x
+  done | wc -l
+}
+
+# count_updated_files: emits one line per file in $1 (src root) whose
+# sha256 differs from the same path under $2 (dst root), and prints the
+# total count on stdout. Pairs with count_missing_files so the Phase 4
+# pre-check can short-circuit only when BOTH are zero (genuine no-op),
+# not just when there are no missing files - otherwise divergent files
+# would never be reached by the per-file loop below.
+count_updated_files() {
+  src_root="$1"
+  dst_root="$2"
+  [ -d "$src_root" ] || { echo 0; return 0; }
+  src_root="${src_root%/}"
+  # Absolute paths from `find $src_root` (see count_missing_files for
+  # why we don't use a subshell cd here).
+  find "$src_root" -type f | while IFS= read -r src; do
+    rel="${src#"$src_root"/}"
+    dst="$dst_root/$rel"
+    [ -e "$dst" ] || continue
+    [ "$(sha256_file "$src")" != "$(sha256_file "$dst")" ] && echo x
   done | wc -l
 }
 
@@ -426,9 +551,11 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
   mkdir -p "$SYSTEM_PAYLOADS_DEST"
 
   HAK5_NEW=0
+  HAK5_UPDATED=0
   HAK5_PRESENT=0
   HAK5_FAILED=""
   MERGE_NEW_LABELS=""
+  MERGE_UPDATED_LABELS=""
   MERGE_PRESENT_LABELS=""
   MERGE_FAILED_LABELS=""
 
@@ -456,6 +583,7 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
   done
 
   HAK5_NEW=$(echo "$MERGE_NEW_LABELS" | wc -w)
+  HAK5_UPDATED=$(echo "$MERGE_UPDATED_LABELS" | wc -w)
   HAK5_PRESENT=$(echo "$MERGE_PRESENT_LABELS" | wc -w)
   HAK5_FAILED="$MERGE_FAILED_LABELS"
 
@@ -466,7 +594,7 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
     fi
   done
 
-  echo "[*] Hak5 payload summary: $HAK5_NEW new, $HAK5_PRESENT already present."
+  echo "[*] Hak5 payload summary: $HAK5_NEW new, $HAK5_UPDATED updated, $HAK5_PRESENT unchanged."
   if [ -n "$HAK5_FAILED" ]; then
     echo "[!] WARNING: failed to copy Hak5 payloads:$HAK5_FAILED"
   fi
@@ -474,72 +602,87 @@ if [ "$SELECTION" = "H" ] || [ "$SELECTION" = "B" ]; then
 fi
 
 # ==========================================
-# PHASE 1B: Skinny-Tools Repo Auto-Fetch (S/B only)
+# PHASE 1B: Skinny-Tools Source Resolution (S/B only)
 # ==========================================
-# If the script was launched from a folder that doesn't contain the full
-# Skinny-Tools repo (e.g. the user only downloaded online-install.sh from
-# GitHub in their browser), fetch the tarball so Phase 3-5 have payloads/,
-# cross-compiled-pager-tools/, pagerctl.py, and libpagerctl.so to work
-# with. A local clone is always preferred when present so existing users
-# running 'git pull && ./online-install.sh' see no behavior change.
+# Strategy: always use upstream HEAD as the source of truth. The local
+# clone sitting next to the script is treated as a last-resort fallback
+# only - users who don't maintain a local copy (e.g. downloaded just
+# online-install.sh from GitHub) will still pick up the maintainer's
+# latest pushes without having to remember to `git pull` first.
+#
+# Fetch order:
+#   1. Try to download the GitHub tarball. On success, refresh the
+#      cache at /mmc/root/.skinny-tools-cache/skinny-tools/ and use it.
+#   2. On download failure: fall back to the existing cache (if any).
+#   3. If no cache: fall back to the local clone at $REPO_DIR (if
+#      complete). Mark the fallback in the log so the user knows
+#      they're running on potentially stale content.
+#   4. If none of the above: critical error, exit.
 # ==========================================
 if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
-  NEEDS_FETCH=0
-  # payloads/ is the most critical - Phase 4 errors out without it.
-  [ -d "$LOCAL_PAYLOADS_DIR" ] || NEEDS_FETCH=1
-  # cross-compiled-pager-tools/ - Phase 3 just warns and skips without it,
-  # but rtl_433 / ubertooth-utils won't install if missing.
-  [ -d "$CROSS_TOOLS_DIR" ] || NEEDS_FETCH=1
-  # pagerctl.py + libpagerctl.so are required by Phase 5's symlink block.
-  if [ ! -f "$REPO_DIR/pagerctl.py" ] || [ ! -f "$REPO_DIR/libpagerctl.so" ]; then
-    NEEDS_FETCH=1
+  SKINNY_CACHE_ROOT="/mmc/root/.skinny-tools-cache"
+  SKINNY_CACHE="$SKINNY_CACHE_ROOT/skinny-tools"
+  SKINNY_TARBALL_URL="https://github.com/skinnyrad/Skinny-Pager-Payloads/archive/refs/heads/master.tar.gz"
+
+  SKINNY_SRC=""
+  SKINNY_STAGE=""
+
+  echo "[*] Fetching Skinny-Tools from github.com/skinnyrad/Skinny-Pager-Payloads..."
+  SKINNY_STAGE="$(mktemp -d -t skinny-tools.XXXXXX)"
+
+  fetch_ok=0
+  if command -v wget >/dev/null 2>&1; then
+    if wget -qO "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL" 2>/dev/null; then
+      fetch_ok=1
+    fi
+  elif command -v curl >/dev/null 2>&1; then
+    if curl -fsSL -o "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL" 2>/dev/null; then
+      fetch_ok=1
+    fi
+  else
+    echo "[-] Critical Error: neither wget nor curl is available on this Pager."
+    exit 1
   fi
 
-  if [ "$NEEDS_FETCH" = "1" ]; then
-    echo "[*] Local Skinny-Tools repo incomplete; fetching from github.com/skinnyrad/Skinny-Tools..."
-    SKINNY_TARBALL_URL="https://github.com/skinnyrad/Skinny-Tools/archive/refs/heads/master.tar.gz"
-    SKINNY_STAGE="$(mktemp -d -t skinny-tools.XXXXXX)"
-
-    if command -v wget >/dev/null 2>&1; then
-      if ! wget -qO "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL"; then
-        echo "[-] Critical Error: wget failed to download Skinny-Tools tarball."
-        exit 1
-      fi
-    elif command -v curl >/dev/null 2>&1; then
-      if ! curl -fsSL -o "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL"; then
-        echo "[-] Critical Error: curl failed to download Skinny-Tools tarball."
-        exit 1
-      fi
-    else
-      echo "[-] Critical Error: neither wget nor curl is available on this Pager."
-      exit 1
-    fi
-
+  if [ "$fetch_ok" = "1" ]; then
     if ! tar -xzf "$SKINNY_STAGE/skinny.tar.gz" -C "$SKINNY_STAGE" 2>/dev/null; then
       echo "[-] Critical Error: tar failed to extract Skinny-Tools tarball."
       exit 1
     fi
-
-    # GitHub tarballs extract to <repo-name>-<branch>/ so the branch name is
-    # part of the path. master is the branch used by skinnyrad/Skinny-Tools.
-    SKINNY_SRC="$SKINNY_STAGE/Skinny-Tools-master"
-    if [ ! -d "$SKINNY_SRC/payloads" ]; then
-      # Fallback: discover whatever directory tar created (covers branch
-      # renames without requiring a script update).
-      SKINNY_SRC="$(find "$SKINNY_STAGE" -mindepth 1 -maxdepth 1 -type d ! -name '*.tar.gz' | head -n 1)"
-      if [ -z "$SKINNY_SRC" ] || [ ! -d "$SKINNY_SRC/payloads" ]; then
-        echo "[-] Critical Error: extracted Skinny-Tools repo is missing payloads/."
-        exit 1
-      fi
+    # GitHub tarballs extract to <repo-name>-<branch>/; discover whatever
+    # directory tar created so branch renames don't require a script edit.
+    SKINNY_SRC="$(find "$SKINNY_STAGE" -mindepth 1 -maxdepth 1 -type d ! -name '*.tar.gz' | head -n 1)"
+    if [ -z "$SKINNY_SRC" ] || [ ! -d "$SKINNY_SRC/payloads" ]; then
+      echo "[-] Critical Error: extracted Skinny-Tools repo is missing payloads/."
+      exit 1
     fi
-
-    REPO_DIR="$SKINNY_SRC"
-    LOCAL_PAYLOADS_DIR="$REPO_DIR/payloads"
-    CROSS_TOOLS_DIR="$REPO_DIR/cross-compiled-pager-tools"
-    echo "[+] Skinny-Tools repo staged from GitHub tarball."
+    # Refresh the cache with the freshly extracted content so the next
+    # offline run still has a recent snapshot to fall back to.
+    mkdir -p "$SKINNY_CACHE_ROOT"
+    rm -rf "$SKINNY_CACHE"
+    cp -r "$SKINNY_SRC" "$SKINNY_CACHE"
+    SKINNY_SRC="$SKINNY_CACHE"
+    echo "[+] Skinny-Tools cache refreshed at $SKINNY_CACHE."
   else
-    echo "[*] Local Skinny-Tools repo detected; using $REPO_DIR"
+    echo "[!] Failed to download Skinny-Tools tarball from GitHub."
+    if [ -d "$SKINNY_CACHE/payloads" ] && [ -d "$SKINNY_CACHE/cross-compiled-pager-tools" ] && \
+       [ -f "$SKINNY_CACHE/pagerctl.py" ] && [ -f "$SKINNY_CACHE/libpagerctl.so" ]; then
+      echo "[*] Falling back to cached Skinny-Tools snapshot at $SKINNY_CACHE (may be stale)."
+      SKINNY_SRC="$SKINNY_CACHE"
+    elif [ -d "$LOCAL_PAYLOADS_DIR" ] && [ -d "$CROSS_TOOLS_DIR" ] && \
+         [ -f "$REPO_DIR/pagerctl.py" ] && [ -f "$REPO_DIR/libpagerctl.so" ]; then
+      echo "[!] No cache available; falling back to local clone at $REPO_DIR (may be stale)."
+      SKINNY_SRC="$REPO_DIR"
+    else
+      echo "[-] Critical Error: no Skinny-Tools source available (no internet, no cache, no local clone)."
+      exit 1
+    fi
   fi
+
+  REPO_DIR="$SKINNY_SRC"
+  LOCAL_PAYLOADS_DIR="$REPO_DIR/payloads"
+  CROSS_TOOLS_DIR="$REPO_DIR/cross-compiled-pager-tools"
+  echo "[+] Using Skinny-Tools source: $REPO_DIR"
 fi
 
 # ==========================================
@@ -685,6 +828,7 @@ echo "[*] Syncing custom security payloads to local hardware storage..."
 
 if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
     MERGE_NEW_LABELS=""
+    MERGE_UPDATED_LABELS=""
     MERGE_PRESENT_LABELS=""
     MERGE_FAILED_LABELS=""
 
@@ -708,27 +852,41 @@ if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
     PRESENT_PAYLOADS="$MERGE_PRESENT_LABELS"
 
     mkdir -p "$SYSTEM_PAYLOADS_DEST"
-    # Pre-check: count any files in the local repo that aren't on the Pager.
-    # If everything's already present (re-run case), skip the per-file sync
-    # block as a no-op rather than iterating every file just to confirm.
+    # Pre-check: count any files in the local repo that aren't on the Pager
+    # AND any that have drifted from upstream. If both are zero (genuine
+    # re-run no-op), skip the per-file sync block rather than iterating
+    # every file just to confirm. The previous form of this check only
+    # counted missing files, which would short-circuit the loop and miss
+    # divergent files - that was a latent bug introduced when the
+    # hash-compare was added inside the else branch.
     MISSING_COUNT=$(count_missing_files "$LOCAL_PAYLOADS_DIR" "$SYSTEM_PAYLOADS_DEST")
-    if [ "$MISSING_COUNT" = "0" ]; then
-      echo "[*] All Skinny-Tools payload files already present on Pager; per-file sync skipped."
+    UPDATED_COUNT=$(count_updated_files "$LOCAL_PAYLOADS_DIR" "$SYSTEM_PAYLOADS_DEST")
+    if [ "$MISSING_COUNT" = "0" ] && [ "$UPDATED_COUNT" = "0" ]; then
+      echo "[*] All Skinny-Tools payload files already present and up-to-date on Pager; per-file sync skipped."
     else
       # Portable "cp -rn" equivalent that actually descends into pre-existing
       # destination directories. BusyBox's cp -n skips the whole copy when the
       # destination dir already exists, which would silently break re-runs.
       # This loop creates all source directories in the destination (mkdir -p
       # is a no-op when they exist) and then copies only files that aren't
-      # already present, preserving any local tweaks to existing files.
-      ( cd "$LOCAL_PAYLOADS_DIR" && find . -type d -exec mkdir -p "$SYSTEM_PAYLOADS_DEST/{}" \; )
-      ( cd "$LOCAL_PAYLOADS_DIR" && find . -type f | while IFS= read -r src; do
-          dst="$SYSTEM_PAYLOADS_DEST/$src"
+      # already present OR have changed upstream (sha256 differs from the
+      # Pager file), preserving any local tweaks that still match upstream.
+      # `find $LOCAL_PAYLOADS_DIR` (not `cd ... && find .`) so the emitted
+      # paths are absolute and remain resolvable in the parent shell for
+      # sha256_file - the subshell cd would orphan the relative paths.
+      LOCAL_PAYLOADS_DIR="${LOCAL_PAYLOADS_DIR%/}"
+      find "$LOCAL_PAYLOADS_DIR" -type d -exec mkdir -p "$SYSTEM_PAYLOADS_DEST/{}" \; 2>/dev/null
+      find "$LOCAL_PAYLOADS_DIR" -type f | while IFS= read -r src; do
+          rel="${src#"$LOCAL_PAYLOADS_DIR"/}"
+          dst="$SYSTEM_PAYLOADS_DEST/$rel"
           if [ ! -e "$dst" ]; then
             mkdir -p "$(dirname "$dst")"
             cp "$src" "$dst"
+          elif [ "$(sha256_file "$src")" != "$(sha256_file "$dst")" ]; then
+            cp "$src" "$dst"
+            echo "[UPDATED FILE] $rel"
           fi
-        done )
+        done
       # Enforce global executable permissions across launcher scripts
       find "$SYSTEM_PAYLOADS_DEST" -name "*.sh" -exec chmod +x {} \;
       echo "[+] Payloads successfully synced to $SYSTEM_PAYLOADS_DEST/"
@@ -747,8 +905,9 @@ if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
     echo "[+] Verified: payloads/user/Skinny-Tools, payloads/user/utilities, payloads/recon/access_point, payloads/recon/client are in place."
 
     NEW_COUNT=$(echo "$NEW_PAYLOADS" | wc -w)
+    UPDATED_COUNT=$(echo "$MERGE_UPDATED_LABELS" | wc -w)
     PRESENT_COUNT=$(echo "$PRESENT_PAYLOADS" | wc -w)
-    echo "[*] Payload summary: $NEW_COUNT new sub-payload(s), $PRESENT_COUNT existing."
+    echo "[*] Payload summary: $NEW_COUNT new, $UPDATED_COUNT updated, $PRESENT_COUNT unchanged."
 else
     echo "[-] Error: 'payloads' folder missing from the cloned Git repository!"
     exit 1
