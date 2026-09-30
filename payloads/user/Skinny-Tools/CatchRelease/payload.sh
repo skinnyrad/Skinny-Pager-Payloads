@@ -9,7 +9,7 @@
 ##              WPA2 (security varies). The loot log records only HITS; every
 ##              probe heard is saved to lists/captured-probes.txt (retargeting)
 ##              and can optionally be folded back into the live flood.
-## Version: 2.0
+## Version: 2.2
 ## Author: Skinny Research & Development
 ##
 ## Notes:
@@ -21,10 +21,12 @@
 ##   - wlan0mon is used as the passive RX sniffer. wlan0mon/wlan2mon cannot
 ##     inject, so airbase modes are legacy/experimental (WPA_TRANSPORT).
 ##   - Open lures (PineAP pool + wlan0open) are off unless OPEN_ENABLE=1.
+##   - Retargeting captured probes is opt-in and defaults to NO, so a
+##     single-type run (e.g. "Apple only") broadcasts ONLY that type.
 ## Layout (under this payload dir):
 ##   lists/open.txt                - open SSIDs, one per line
 ##   lists/wpa.txt                 - targeted WPA/WPA2-PSK SSIDs (SSID|enc)
-##   lists/common_router_ssids.txt - default router SSIDs, ALWAYS flooded
+##   lists/common_router_ssids.txt - default router SSIDs (Router lure)
 ##   lists/stores.txt              - retail/food/hotel SSIDs (open AND WPA2)
 ##   lists/apple.txt               - Apple Store SSIDs (open AND WPA2)
 ##   lists/wpa_ent.txt             - WPA2-Enterprise (802.1X) SSIDs
@@ -169,21 +171,11 @@ clean_list() { # $1=file -> stdout clean lines (no comments/blanks, strip |suffi
 
 # ---- interactive lure-type checklist (Pager UI) -----------------------
 
-gui_confirm() { # $1=message -> 0 if the user confirmed
-    local resp rc
-    resp="$(CONFIRMATION_DIALOG "$1" 2>/dev/null)"
-    rc=$?
-    case "$rc" in
-        "${DUCKYSCRIPT_REJECTED:-3}"|"${DUCKYSCRIPT_CANCELLED:-2}"|"${DUCKYSCRIPT_ERROR:-4}") return 1 ;;
-    esac
-    [ "$resp" = "${DUCKYSCRIPT_USER_CONFIRMED:-1}" ] && return 0
-    return 1
-}
-
 # Lure selection. Shows a LIST_PICKER preset menu (multi-select emulation)
-# when launched from the Pager UI, plus a "Retarget?" confirmation. Over
-# SSH/automation set CATCH_NO_PROMPT=1 and override with CATCH_COMMON/CATCH_WPA/
-# CATCH_OPEN/CATCH_RETARGET (0/1).
+# when launched from the Pager UI, then an opt-in "captured probes?" picker
+# that defaults to No. Over SSH/automation set CATCH_NO_PROMPT=1 and override
+# with CATCH_COMMON/CATCH_WPA/CATCH_OPEN/CATCH_STORES/CATCH_APPLE/CATCH_RETARGET
+# (0/1).
 choose_lures() {
     ENABLE_COMMON="${CATCH_COMMON:-1}"
     ENABLE_WPA="${CATCH_WPA:-1}"
@@ -195,20 +187,28 @@ choose_lures() {
         emit yellow "[$(ts)] Lure selection (no prompt): router=$ENABLE_COMMON wpa=$ENABLE_WPA open=$ENABLE_OPEN stores=$ENABLE_STORES apple=$ENABLE_APPLE retarget=$ENABLE_RETARGET"
         return 0
     fi
-    local choice
+    local choice rt
     choice="$(LIST_PICKER "Broadcast which lures?" \
         "All" "Router only" "Open only" "WPA only" "Store only" "Apple only" "Open + WPA only" "All" 2>/dev/null)"
+    choice="${choice%$'\r'}"
     ENABLE_COMMON=0; ENABLE_WPA=0; ENABLE_OPEN=0; ENABLE_STORES=0; ENABLE_APPLE=0
     case "$choice" in
-        "Router only")    ENABLE_COMMON=1 ;;
-        "Open only")      ENABLE_OPEN=1 ;;
-        "WPA only")       ENABLE_WPA=1 ;;
-        "Store only")     ENABLE_STORES=1 ;;
-        "Apple only")     ENABLE_APPLE=1 ;;
+        "All")             ENABLE_COMMON=1; ENABLE_WPA=1; ENABLE_OPEN=1; ENABLE_STORES=1; ENABLE_APPLE=1 ;;
+        "Router only")     ENABLE_COMMON=1 ;;
+        "Open only")       ENABLE_OPEN=1 ;;
+        "WPA only")        ENABLE_WPA=1 ;;
+        "Store only")      ENABLE_STORES=1 ;;
+        "Apple only")      ENABLE_APPLE=1 ;;
         "Open + WPA only") ENABLE_OPEN=1; ENABLE_WPA=1 ;;
-        *)                ENABLE_COMMON=1; ENABLE_WPA=1; ENABLE_OPEN=1; ENABLE_STORES=1; ENABLE_APPLE=1 ;;
+        *)
+            emit red "[$(ts)] No lure selected (got '$choice'); aborting."
+            exit 1 ;;
     esac
-    gui_confirm "Retarget captured probes (rebroadcast them)?" && ENABLE_RETARGET=1 || ENABLE_RETARGET=0
+    rt="$(LIST_PICKER "Also rebroadcast captured probes?" "No" "Yes" "No" 2>/dev/null)"
+    case "$rt" in
+        "Yes") ENABLE_RETARGET=1 ;;
+        *)     ENABLE_RETARGET=0 ;;
+    esac
     emit green "[$(ts)] Lure selection '$choice': router=$ENABLE_COMMON wpa=$ENABLE_WPA open=$ENABLE_OPEN stores=$ENABLE_STORES apple=$ENABLE_APPLE retarget=$ENABLE_RETARGET"
 }
 
@@ -667,11 +667,15 @@ viewer() {
         if [ "$total" -gt "$offset" ]; then
             newlines=$((total - offset))
             lim="$newlines"; [ "$lim" -gt 12 ] && lim=12
-            # Compact: only show hits as  HH:MM:SS  EV  SSID  RSI  MAC
+            # Compact: show only HITS (a device probed an SSID we broadcast,
+            # or tried to auth/assoc to one of our BSSIDs). All probes are
+            # still captured to lists/captured-probes.{txt,log} independently.
             tail -n +$((offset + 1)) "$curfile" 2>/dev/null | head -n "$lim" \
                 | while IFS=$'\t' read -r ts ev mac ssid name rssi note; do
                     case "$ev" in
-                        PROBE|AUTH|ASSOC) emit "  ${ts#* }  $ev  $ssid  ${rssi}  $mac" ;;
+                        PROBE) emit green  "  [HIT] ${ts#* }  probe  '$ssid'  ${rssi}dBm  $mac" ;;
+                        AUTH)  emit yellow "  [HIT] ${ts#* }  AUTH   '$ssid'  ${rssi}dBm  $mac" ;;
+                        ASSOC) emit yellow "  [HIT] ${ts#* }  ASSOC  '$ssid'  ${rssi}dBm  $mac" ;;
                     esac
                 done
             [ "$newlines" -gt "$lim" ] && emit yellow "  (+$((newlines - lim)) more)"
