@@ -1,0 +1,11 @@
+# Targeted WPA/WPA2-PSK lure SSIDs (manual). Typically produced by pulling
+# SSIDs near the target from WiGLE and pasting the encrypted ones here.
+# Format: SSID or SSID|enc ; # comments and blank lines ignored.
+# The payload ALWAYS also floods lists/common_router_ssids.txt.
+#
+# Current test set: iPhone PNL (encrypted) used during development.
+IceCreamBase|psk2
+GL-MT300N-V2-579|psk2
+LabNet|psk2
+PwnSat-C3-Lab|psk2
+AT&T Secure Wi-Fi|psk2

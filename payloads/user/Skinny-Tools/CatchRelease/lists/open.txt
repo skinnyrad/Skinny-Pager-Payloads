@@ -1,0 +1,59 @@
+# One SSID per line. Beaconed + mimic-answered as OPEN lures.
+# Lines starting with # and blank lines are ignored.
+CatchRelease-TEST
+
+# --- common public / ISP roaming hotspots (genuinely open) ---
+xfinitywifi
+XFINITY
+CableWiFi
+coxwifi
+CoxWiFi
+optimumwifi
+TWCWiFi
+BTWi-fi
+O2 Wifi
+tmobile
+T-Mobile
+Vodafone Hotspot
+UPC Wi-Free
+Free Public WiFi
+FreeWifi
+
+# --- coffee / retail ---
+Google Starbucks
+Starbucks WiFi
+mcdonalds
+Panera
+Chick-fil-A WiFi
+walmartwifi
+Target Guest Wi-Fi
+HomeDepot Public Wi-Fi
+Lowes-Guest-WiFi
+Macysfreewifi
+
+# --- hotel / airline / airport ---
+hhonors
+HHonors
+Hilton Honors
+Marriott_GUEST
+MARRIOTT_GUEST
+Courtyard_GUEST
+HolidayInn
+HolidayInn_Guest
+Hyatt
+Wyndam Guest
+Boingo Hotspot
+gogoinflight
+DeltaWiFi
+unitedwifi
+amtrak
+Wayport_Access
+airportthru
+Airport_FreeInternet
+
+# --- generic open ---
+Guest
+GUEST
+guest
+public
+guestnet

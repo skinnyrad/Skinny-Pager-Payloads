@@ -1,0 +1,6 @@
+# WPA2-Enterprise (802.1X) lure SSIDs — one per line, # comments ignored.
+# Beaconed with RSN/EAP (AKM 802.1X) so devices whose PNL has an Enterprise
+# network will probe/attempt. Nothing answers association.
+# Typically written by bin/wigle-pull.py (enterprise networks in the bbox).
+eduroam
+Corp-WiFi

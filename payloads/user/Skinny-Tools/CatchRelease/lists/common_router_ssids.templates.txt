@@ -1,0 +1,61 @@
+# Common residential router SSID templates (people rarely rename the default).
+# Syntax (expanded by bin/gen-common-ssids.py -> lists/common_router_ssids.txt):
+#   x/X run   alphanumeric placeholder of that length (numeric-first)
+#   {a|b|}    alternatives, one chosen per SSID (empty allowed)
+# Example: GL-MT300N{|-V1|-V2}-XXX covers GL-MT300N-<sfx>, -V1-<sfx>, -V2-<sfx>.
+# Lines starting with # are ignored. These are treated as WPA2-PSK lures.
+Linksys
+Linksys_XXXX
+NETGEAR
+NETGEARXX
+NETGEARXX-5G
+TP-Link_XXXX
+TP-Link_XXXX_5G
+ASUS
+ASUS_XX
+ASUS_XX_5G
+dlink
+dlink-XXXX
+DIR-XXXX
+GoogleHomeXXXX
+SetupXXXX.o
+eero-XXXX
+belkin.xxx
+belkin_XXXX
+Tenda_XXXXXX
+BUFFALO-XXXXXX
+Actiontec
+Actiontec-XXXX
+ZyXEL
+ZyXEL_XXXX
+STARLINK
+STINKY
+GL-XXXX
+GL-AXT1800{|-V1|-V2}-XXX
+GL-MT3000{|-V1|-V2}-XXX
+GL-MT300N{|-V1|-V2}-XXX
+GL-MT300N2{|-V1|-V2}-XXX
+GL-SFT1200{|-V1|-V2}-XXX
+GL-BE3600{|-V1|-V2}-XXX
+Cudy-XXXX
+Cudy-TR3000{|-V1|-V2}-XXXX
+WAVLINK-XXXX
+WAVLINK_AX3000_XXXX
+Skyroam_XXXX
+Solis_XXXX
+Nighthawk-M6{|-V2}-XXXX
+xFi-XXXX
+HOME-XXXX
+xfinitywifi
+ATTxxxxxxx
+ATT_XXXXXX
+Fios-XXXXX
+SpectrumSetup-XX
+MySpectrumWiFiXX-2G
+MySpectrumWiFiXX-5G
+CenturyLinkXXXX
+CoxWiFi
+Cox-XXXXXX
+BT-XXXXXX
+BTHubXX-XXXX
+VMXXXXXXX

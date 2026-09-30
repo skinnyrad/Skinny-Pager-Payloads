@@ -1,0 +1,122 @@
+# Store / retail / food / hotel lure SSIDs — common places people go.
+# (Apple Store SSIDs live in lists/apple.txt.)
+# Security varies (many are open captive portals: walmartwifi, HomeDepot...;
+# some hotels are WPA2), so the payload beacons every entry here as BOTH open
+# AND WPA2 to match whatever a device's PNL remembers.
+# # comments and blank lines ignored.
+#
+# --- Microsoft stores ---
+Microsoft Store
+MicrosoftStore
+Microsoft Store Guest
+
+# --- Big box / hardware / warehouse ---
+walmartwifi
+Walmart WiFi
+Walmart Guest
+HomeDepot Public Wi-Fi
+Home Depot Guest
+Lowes-Guest-WiFi
+Lowe's Guest WiFi
+bestbuy
+Best Buy Guest
+Target Guest Wi-Fi
+CostcoWiFi
+Costco Guest
+SamsClubWiFi
+Sams Club Guest
+BJ's Guest WiFi
+
+# --- Grocery / pharmacy / convenience ---
+Kroger WiFi
+Publix Wi-Fi
+Safeway Guest
+Albertsons Guest
+H-E-B WiFi
+Meijer WiFi
+Trader Joe's WiFi
+Whole Foods Market
+Sprouts Guest
+Aldi Guest
+Walgreens Guest
+CVS Guest WiFi
+Rite Aid WiFi
+Dollar General WiFi
+Dollar Tree WiFi
+Family Dollar WiFi
+7-Eleven WiFi
+Circle K WiFi
+Wawa WiFi
+QuikTrip WiFi
+Sheetz Guest
+Buc-ee's WiFi
+
+# --- Department / apparel / home ---
+Macysfreewifi
+Nordstrom_Wi-Fi
+Kohls Guest
+JCPenney WiFi
+Marshalls Guest
+TJ Maxx WiFi
+Ross Guest
+Old Navy WiFi
+Gap Guest WiFi
+H&M Free WiFi
+Sephora Free WiFi
+HomeGoods WiFi
+Michaels Guest WiFi
+StaplesHotspot
+office depot wifi
+PetSmart Guest
+Petco WiFi
+REI Guest
+Dicks Sporting Goods
+Bass Pro Shops
+
+# --- Food / coffee / quick service ---
+Starbucks WiFi
+Google Starbucks
+Dunkin Guest WiFi
+Tim Hortons WiFi
+mcdonalds
+Panera
+Chick-fil-A WiFi
+Subway
+Chipotle WiFi
+Wendys WiFi
+Taco Bell WiFi
+Burger King WiFi
+KFC WiFi
+Popeyes WiFi
+Dominos WiFi
+Pizza Hut WiFi
+Papa Johns WiFi
+Sonic WiFi
+Whataburger WiFi
+In-N-Out WiFi
+
+# --- Hotels / hospitality ---
+hhonors
+Hilton Honors
+Marriott_GUEST
+Courtyard_GUEST
+ResidenceInn_GUEST
+Fairfield_GUEST
+HolidayInn_Guest
+Hyatt
+Wyndam Guest
+BestWestern
+Comfort Inn
+laquinta
+motel6
+Quality Inn
+DaysInn
+IHG
+Radisson
+Sheraton
+Westin
+Ritz-Carlton
+W Hotels
+DoubleTree
+Hampton Inn
+Embassy Suites

@@ -14,3 +14,5 @@ payloads/user/Skinny-Tools/ATT-Pseudonym/
 payloads/user/Skinny-Tools/ATT-Revert/
 payloads/user/Skinny-Tools/ATT-Status/
 payloads/user/Skinny-Tools/ATT-Stop/
+
+payloads/user/Skinny-Tools/CatchRelease/lists/captured-probes.*

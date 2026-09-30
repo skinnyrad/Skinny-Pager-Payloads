@@ -1,0 +1,7 @@
+# Apple Store lure SSIDs. Apple retail guest networks are broadcast OPEN and
+# devices with them in their PNL auto-join/attempt. Beaconed as BOTH open and
+# WPA2 (security can vary). # comments and blank lines ignored.
+Apple Store
+Apple Demo
+AppleStore
+Apple Store Guest
