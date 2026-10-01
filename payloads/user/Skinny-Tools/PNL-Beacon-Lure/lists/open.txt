@@ -57,3 +57,12 @@ GUEST
 guest
 public
 guestnet
+
+# --- additional airport / retail / airline (open only) ---
+!BNA Free Wi-Fi
+Apple Store
+ATL Free Wi-Fi
+Auckland Airport
+DeltaSkyClub
+DeltaWiFi.com
+dillardswifi
