@@ -45,6 +45,9 @@ Short summaries of every custom payload staged in this repository.
 * **gps-mgmtap-nmea** - Enables (or disables) NMEA GPS data relay on UDP port 9999 of the Mgmt AP so a phone running `gpsdRelay` / `NMEA Send Location` / `C5 Wardriver` can supply GPS to the Pager.
   Original by cncartistsec; staged here for student organization. Backs up and restores the prior `gpsd` device path.
 
+* **PNL-Beacon-Lure** - Optimized open + WPA2 beacon flood that broadcasts a large lure set (WPA2-PSK, WPA2-Enterprise, open; store/Apple SSIDs as both) on the inject radio.
+  No WPA lure is ever connectable (no PSK is provided) — the goal is to elicit probes from devices whose preferred-network list (PNL) matches a broadcast SSID, then log those hits. Lure types are chosen from the Pager UI; captured probes can optionally be folded back into the live flood. Requires `python3`, `tcpdump`, and `iw` (plus `hostapd_cli` for the native/hostapd_multi transports). Loot: `/root/loot/pnl-beacon-lure/`.
+
 * **Recon-Toggle** - Toggles the `pineapd.@pineapd[0].logrecon` UCI setting and restarts `pineapd`.
   Flips the Recon logger between logging-on and logging-off without touching existing data; confirms with a Y/n prompt.
 

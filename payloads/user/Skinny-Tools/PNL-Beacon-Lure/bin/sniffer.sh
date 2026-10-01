@@ -1,5 +1,5 @@
 #!/bin/bash
-# Title: Catch-and-Release Hit Sniffer
+# Title: PNL-Beacon-Lure Hit Sniffer
 # Description: Passive monitor that logs only HITS to the daily loot log — a
 #              device probing an SSID WE broadcast, or authenticating/(re)assoc
 #              to one of our BSSIDs. Every directed probe we receive is also
@@ -14,20 +14,20 @@
 # Usage: sniffer.sh [mon_iface] [broadcast_file] [bssid_map] [lootdir] [retarget_file]
 #
 # Output:
-#   LOOTDIR/YYYYMMDD-Catch-and-release.log  TS EVENT MAC SSID NAME RSSI NOTE  (hits only)
+#   LOOTDIR/YYYYMMDD-PNL-Beacon-Lure.log  TS EVENT MAC SSID NAME RSSI NOTE  (hits only)
 #   lists/captured-probes.txt               SSID<TAB>first-seen  (retargeting)
 #   lists/captured-probes.log               TS MAC SSID RSSI detail
 
 set -u
 MON_IFACE="${1:-wlan0mon}"
-BROADCAST_FILE="${2:-/tmp/catch-release-broadcast.txt}"
-BSSID_MAP="${3:-/tmp/catch-release-bssid-map.txt}"
-LOOTDIR="${4:-/root/loot/catch-release}"
+BROADCAST_FILE="${2:-/tmp/pnl-beacon-lure-broadcast.txt}"
+BSSID_MAP="${3:-/tmp/pnl-beacon-lure-bssid-map.txt}"
+LOOTDIR="${4:-/root/loot/pnl-beacon-lure}"
 RETARGET_FILE="${5:-}"
 PAYLOAD_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
-[ -n "$PAYLOAD_DIR" ] || PAYLOAD_DIR="/root/payloads/user/Skinny-Tools/CatchRelease"
-CAPTURE="${CATCH_CAPTURE:-$PAYLOAD_DIR/lists/captured-probes.txt}"
-CAPTURE_LOG="${CATCH_CAPTURE_LOG:-$PAYLOAD_DIR/lists/captured-probes.log}"
+[ -n "$PAYLOAD_DIR" ] || PAYLOAD_DIR="/root/payloads/user/Skinny-Tools/PNL-Beacon-Lure"
+CAPTURE="${PNL_CAPTURE:-$PAYLOAD_DIR/lists/captured-probes.txt}"
+CAPTURE_LOG="${PNL_CAPTURE_LOG:-$PAYLOAD_DIR/lists/captured-probes.log}"
 mkdir -p "$LOOTDIR" "$PAYLOAD_DIR/lists" 2>/dev/null
 
 run_sniffer() {
@@ -36,7 +36,7 @@ tcpdump -i "$MON_IFACE" -l -e -s 256 -y IEEE802_11_RADIO \
     2>/dev/null | awk -v dir="$LOOTDIR" -v bfile="$BROADCAST_FILE" \
         -v bmap="$BSSID_MAP" -v cap="$CAPTURE" -v caplog="$CAPTURE_LOG" -v rfile="$RETARGET_FILE" '
 function loghit(ts, ev, mac, ssid, bssid, rssi, note,   f) {
-    f = dir "/" strftime("%Y%m%d") "-Catch-and-release.log"
+    f = dir "/" strftime("%Y%m%d") "-PNL-Beacon-Lure.log"
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ts, ev, mac, \
         (ssid == "" ? "<none>" : ssid), "", rssi, note >> f
     close(f)

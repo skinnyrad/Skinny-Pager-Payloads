@@ -1,6 +1,6 @@
 # One SSID per line. Beaconed + mimic-answered as OPEN lures.
 # Lines starting with # and blank lines are ignored.
-CatchRelease-TEST
+PNLBeacon-TEST
 
 # --- common public / ISP roaming hotspots (genuinely open) ---
 xfinitywifi

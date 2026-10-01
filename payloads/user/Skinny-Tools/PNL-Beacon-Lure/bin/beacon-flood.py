@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Catch-and-Release beacon flood: inject beacons for WPA2-PSK, WPA2-Enterprise,
+# PNL-Beacon-Lure beacon flood: inject beacons for WPA2-PSK, WPA2-Enterprise,
 # and OPEN SSID lists on a monitor/inject iface (AF_PACKET). Each SSID gets a
 # stable, real-OUI, non-LAA BSSID. PSK/enterprise entries carry an RSN IE
 # (+ Privacy bit); open entries carry neither. Nothing answers association, so
@@ -98,7 +98,7 @@ def main():
     frames += [radiotap + beacon(bssid_for(s, "e"), s, channel, "enterprise") for s in ent]
 
     # Map our BSSIDs -> SSID so the sniffer can attribute AUTH/ASSOC hits.
-    map_path = os.environ.get("CATCH_BSSID_MAP", "/tmp/catch-release-bssid-map.txt")
+    map_path = os.environ.get("PNL_BSSID_MAP", "/tmp/pnl-beacon-lure-bssid-map.txt")
     try:
         with open(map_path, "w") as fh:
             for salt, group in (("w", psk), ("o", opn), ("e", ent)):

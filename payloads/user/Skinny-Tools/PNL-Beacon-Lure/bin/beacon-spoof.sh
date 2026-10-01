@@ -1,5 +1,5 @@
 #!/bin/bash
-# Title: Catch-and-Release WPA Beacon Spoofer
+# Title: PNL-Beacon-Lure WPA Beacon Spoofer
 # Description: Beacons WPA-lure SSIDs with real WPA2-CCMP (RSN) tags via
 #              airbase-ng so they look encrypted in scan lists. Nothing is
 #              associable: airbase answers probes/auth with fake EAPOL and
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WPA_LIST="${1:-$SCRIPT_DIR/../lists/wpa.txt}"
 CHANNEL="${2:-1}"
 MON_IFACE="${3:-wlan0mon}"
-ESSIDS_FILE="/tmp/catch-release-essids"
+ESSIDS_FILE="/tmp/pnl-beacon-lure-essids"
 APID=""
 
 cleanup() {
@@ -79,13 +79,13 @@ echo "beacon-spoof: advertising $COUNT WPA2-CCMP SSID(s) as $BSSID on $MON_IFACE
 # ---- beacon probed names too (-C 30), 100ms beacons, quiet ----
 airbase-ng --essids "$ESSIDS_FILE" -a "$BSSID" -c "$CHANNEL" \
     -Z 4 -P -C 30 -I 100 -q \
-    -F /tmp/catch-release-airbase.pcap \
-    "$MON_IFACE" >/tmp/catch-release-airbase.log 2>&1 &
+    -F /tmp/pnl-beacon-lure-airbase.pcap \
+    "$MON_IFACE" >/tmp/pnl-beacon-lure-airbase.log 2>&1 &
 APID=$!
 sleep 2
 if ! kill -0 "$APID" 2>/dev/null; then
-    echo "beacon-spoof: airbase-ng failed to start (see /tmp/catch-release-airbase.log)" >&2
-    tail -5 /tmp/catch-release-airbase.log 2>/dev/null >&2
+    echo "beacon-spoof: airbase-ng failed to start (see /tmp/pnl-beacon-lure-airbase.log)" >&2
+    tail -5 /tmp/pnl-beacon-lure-airbase.log 2>/dev/null >&2
     exit 1
 fi
 
