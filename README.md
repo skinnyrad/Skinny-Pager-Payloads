@@ -71,8 +71,8 @@ Short summaries of every custom payload staged in this repository.
 
 ### Alerts (`payloads/alerts/`)
 
-* **CatchAndRelease** - Alert payload that fires when a device connects to the Pager's PineAP karma/mimicry AP (the `pineapple_client_connected` event).
-  Logs which bait SSID enticed the device, plus the client MAC and resolved hostname (dnsmasq lease → `whoismac` vendor fallback), to `/root/loot/catch-and-release/YYYYMMDD-catch-and-release.log`, and shows a simple on-screen `ALERT` (Host / MAC / SSID). Connect-only. Requires PineAP karma/mimicry to be enabled and the `pineapple_client_connected` alert category to be active on the Pager.
+* **CatchAndRelease** - Alert payload that fires when a device connects to the Pager's PineAP/OpenAP (the `pineapple_client_connected` event).
+  Logs which bait SSID enticed the device, plus the client MAC, best-effort real name (mDNS display name via `umdns` → DHCP hostname → OUI vendor → `random MAC`/`unknown`), and DHCP IP to `/root/loot/catch-and-release/YYYYMMDD-catch-and-release.log`. The on-screen `ALERT` shows `Dev Name` / `MAC(R)` / `SSID` / `man`, where MAC is flagged `(R)` when randomized and `man` is the manufacturer (OUI vendor, or Apple via mDNS / an iPhone lockdownd probe for randomized MACs).   The Pager's own interface MACs are detected at runtime and logged as `Pager(self)` without raising an alert. Connect-only. The optional `umdns` package (installed by `online-install.sh`) enables mDNS names; without it the payload still works via the DHCP/vendor fallbacks. Requires PineAP/OpenAP association alerting to be enabled and the `pineapple_client_connected` alert category active on the Pager.
 
 
 ### Capabilities Added (Cross-compiled tools)

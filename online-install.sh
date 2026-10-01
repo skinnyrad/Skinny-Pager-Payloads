@@ -777,6 +777,17 @@ if ! command -v airodump-ng >/dev/null 2>&1; then
     exit 1
 fi
 
+# Optional: umdns lets the CatchAndRelease alert resolve devices' real mDNS
+# display names (e.g. "Jeff’s MacBook Pro" / "Josh’s iPhone"). Not required -
+# the payload falls back to DHCP hostname/vendor without it - so a failure
+# here is non-fatal.
+if ! command -v umdns >/dev/null 2>&1; then
+  echo "[*] Installing umdns (mDNS name resolution for CatchAndRelease)..."
+  opkg update >/dev/null 2>&1
+  opkg install umdns >/dev/null 2>&1 \
+    || echo "[!] umdns install failed; CatchAndRelease will use DHCP/vendor names."
+fi
+
 # ==========================================
 # PHASE 3: Cross-Compiled .ipk Discovery & Install
 # ==========================================
