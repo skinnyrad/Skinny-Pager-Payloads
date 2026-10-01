@@ -69,6 +69,11 @@ Short summaries of every custom payload staged in this repository.
 * **WindowsFriendlyHandshakes** - Strips colons from handshake capture filenames in `/root/loot/handshakes/` so they're valid on Windows filesystems.
   Batch-renames every `*:*` entry in place; doesn't touch file contents, only names.
 
+### Alerts (`payloads/alerts/`)
+
+* **CatchAndRelease** - Alert payload that fires when a device connects to the Pager's PineAP karma/mimicry AP (the `pineapple_client_connected` event).
+  Logs which bait SSID enticed the device, plus the client MAC and resolved hostname (dnsmasq lease → `whoismac` vendor fallback), to `/root/loot/catch-and-release/YYYYMMDD-catch-and-release.log`, and shows a simple on-screen `ALERT` (Host / MAC / SSID). Connect-only. Requires PineAP karma/mimicry to be enabled and the `pineapple_client_connected` alert category to be active on the Pager.
+
 
 ### Capabilities Added (Cross-compiled tools)
 * **rtl_433_MIPS** - Write payloads to detect TPMS sensors and other RTL-SDR detections

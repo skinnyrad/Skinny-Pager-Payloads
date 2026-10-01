@@ -243,6 +243,25 @@ if [ "$MODE" = "uninstall" ]; then
         fi
       done
     done
+
+    # Alerts tree: remove only the payloads WE ship (CatchAndRelease), never
+    # Hak5 factory alert payloads (example/, deduplicate/, ...).
+    src="$LOCAL_PAYLOADS_DIR/alerts/pineapple_client_connected"
+    if [ -d "$src" ]; then
+      for entry in "$src"/*; do
+        [ -d "$entry" ] || continue
+        name="$(basename "$entry")"
+        dst="$SYSTEM_PAYLOADS_DEST/alerts/pineapple_client_connected/$name"
+        if [ -d "$dst" ]; then
+          echo "    -> alerts/pineapple_client_connected/$name"
+          rm -rf "$dst"
+          REMOVED=$((REMOVED + 1))
+        else
+          echo "    [skip] alerts/pineapple_client_connected/$name (not present)"
+          SKIPPED=$((SKIPPED + 1))
+        fi
+      done
+    fi
     echo "[*] Payload removal summary: $REMOVED removed, $SKIPPED skipped."
 
     # Tidy up: remove the empty parent trees we created ourselves so the
@@ -869,6 +888,16 @@ if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
                              "$SYSTEM_PAYLOADS_DEST/recon/$tree" \
                              "recon/$tree"
     done
+
+    # Alert payloads we ship (e.g. CatchAndRelease) under the factory
+    # pineapple_client_connected category. Guarded so Hak5-only / repos
+    # without payloads/alerts/ are unaffected, and no-clobber so any Hak5
+    # factory alert payloads in the same category are preserved.
+    if [ -d "$LOCAL_PAYLOADS_DIR/alerts/pineapple_client_connected" ]; then
+      merge_payload_category "$LOCAL_PAYLOADS_DIR/alerts/pineapple_client_connected" \
+                             "$SYSTEM_PAYLOADS_DEST/alerts/pineapple_client_connected" \
+                             "alerts/pineapple_client_connected"
+    fi
 
     NEW_PAYLOADS="$MERGE_NEW_LABELS"
     PRESENT_PAYLOADS="$MERGE_PRESENT_LABELS"
