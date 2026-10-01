@@ -6,7 +6,7 @@
 ##              plus MAC and the bait SSID it connected to; appends a line to
 ##              loot. Shows a simple on-screen ALERT.
 ## Author: Skinny Research & Development
-## Version: 2.7
+## Version: 2.8
 ##
 ## Trigger: this is an ALERT payload. The Pager's pineapd launches it when a
 ##          client associates to the PineAP/OpenAP (pineapple_client_connected
@@ -220,11 +220,6 @@ if [ -z "$NAME" ] && [ -n "$DH" ]; then
     NAME="$DH"; NAME_SRC="dhcp"
 fi
 [ -n "$NAME" ] || NAME="$(vendor_for "$MAC")"
-if [ -z "$NAME" ]; then
-    if is_random_mac "$MAC"; then NAME="random MAC"; else NAME="unknown"; fi
-fi
-NAME="$(san "$NAME")"
-[ -n "$NAME" ] || NAME="unknown"
 
 # --- Manufacturer (best effort) ---
 MAN="$(vendor_for "$MAC")"
@@ -232,6 +227,19 @@ if [ -z "$MAN" ] && [ "$NAME_SRC" = "mdns" ]; then MAN="Apple"; fi
 if [ -z "$MAN" ] && port_open "$IP" 62078; then MAN="iPhone"; fi
 MAN="$(san "$MAN")"
 [ -n "$MAN" ] || MAN="Unknown"
+
+# When the real name isn't on the wire, show what the manufacturer tells us
+# (e.g. an iPhone that advertises nothing and is locked down) rather than a
+# bare "random MAC".
+if [ -z "$NAME" ]; then
+    case "$MAN" in
+        iPhone) NAME="iPhone" ;;
+        Apple)  NAME="Apple device" ;;
+        *)      if is_random_mac "$MAC"; then NAME="random MAC"; else NAME="unknown"; fi ;;
+    esac
+fi
+NAME="$(san "$NAME")"
+[ -n "$NAME" ] || NAME="unknown"
 
 # --- MAC label: flag randomized (locally-administered) MACs ---
 if is_random_mac "$MAC"; then MACLABEL="MAC(R)"; else MACLABEL="MAC"; fi
