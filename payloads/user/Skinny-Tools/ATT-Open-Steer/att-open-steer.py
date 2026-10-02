@@ -66,6 +66,12 @@ import sys
 import time
 from datetime import datetime
 
+# The Pager UI launches payloads with a minimal environment whose PATH does not
+# include /usr/sbin, so bare `hostapd_cli` (and friends) fail with ENOENT when
+# launched from the UI even though they work over SSH. Pin the standard Pager
+# tool dirs so every subprocess resolves regardless of how we were started.
+os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin:" + os.environ.get("PATH", "")
+
 # ---------------------------------------------------------------------------
 # interfaces / constants
 # ---------------------------------------------------------------------------
@@ -247,7 +253,9 @@ def verify_bss_up(iface, timeout=90):
 
 
 def hostapd_cli(iface, *args, ctrl="/var/run/hostapd"):
-    return subprocess.run(["hostapd_cli", "-p", ctrl, "-i", iface] + list(args),
+    # Prefer the absolute path: the UI's minimal PATH may not include /usr/sbin.
+    exe = "/usr/sbin/hostapd_cli" if os.path.exists("/usr/sbin/hostapd_cli") else "hostapd_cli"
+    return subprocess.run([exe, "-p", ctrl, "-i", iface] + list(args),
                           capture_output=True, text=True).stdout.strip()
 
 
@@ -813,7 +821,7 @@ def run(args, log_fp):
         shell_out(f"{ISOLATE_SCRIPT} up")
         server_ip = "192.168.99.1"
         dhp = subprocess.Popen(
-            ["python3", DHCPD_SCRIPT, server_ip],
+            [sys.executable or "python3", DHCPD_SCRIPT, server_ip],
             stdout=open(os.path.join(args.run_dir, "dhcpd.log"), "a", buffering=1),
             stderr=subprocess.STDOUT)
         args.dhcp_pid = dhp.pid
@@ -832,7 +840,7 @@ def run(args, log_fp):
     ensure_internet_routing([AP_OPEN, AP_ENT], log_fp)
 
     # IE-221 OUIs on the open attwifi (legacy hotspot signature)
-    shell_out(f"python3 {IE221_SCRIPT} --ifname {AP_OPEN}")
+    shell_out(f"{sys.executable or 'python3'} {IE221_SCRIPT} --ifname {AP_OPEN}")
     shell_out("killall -HUP hostapd 2>/dev/null; true")
     time.sleep(1)
 
@@ -842,7 +850,7 @@ def run(args, log_fp):
     if args.enterprise:
         radius_log = os.path.join(args.run_dir, "radius.log")
         radius = subprocess.Popen(
-            ["python3", RADIUS_SCRIPT, "--bind", "127.0.0.1", "--port", "1812",
+            [sys.executable or "python3", RADIUS_SCRIPT, "--bind", "127.0.0.1", "--port", "1812",
              "--secret", RADIUS_SECRET, "--mode", args.radius_mode,
              "--log", radius_log],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -858,7 +866,7 @@ def run(args, log_fp):
 
 def start_wispr(args, server_ip, log_fp):
     w = subprocess.Popen(
-        ["python3", WISPR_SCRIPT, "--port", str(WISPR_PORT),
+        [sys.executable or "python3", WISPR_SCRIPT, "--port", str(WISPR_PORT),
          "--log", os.path.join(args.run_dir, "wispr.log"),
          "--server-ip", server_ip, "--wispr-mode", "apple-success"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
