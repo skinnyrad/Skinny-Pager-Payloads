@@ -38,7 +38,7 @@ Logs every request to --log with (ts, src_ip, path, response_kind).
 import argparse
 import datetime
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APPLE_SUCCESS_HTML = (
     b"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"
@@ -70,6 +70,7 @@ WISPR_SUCCESS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 class WISPrHandler(BaseHTTPRequestHandler):
     server_version = "v28_wispr/1.0"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         return
@@ -103,6 +104,7 @@ class WISPrHandler(BaseHTTPRequestHandler):
 
     def _send_empty(self, status):
         self.send_response(status)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self):
@@ -188,7 +190,7 @@ def main():
     log_fp.flush()
 
     print(f"[v28_wispr] binding HTTPServer on {args.bind}:{args.port}", flush=True)
-    srv = HTTPServer((args.bind, args.port), WISPrHandler)
+    srv = ThreadingHTTPServer((args.bind, args.port), WISPrHandler)
     print(f"[v28_wispr] bound, setting attrs", flush=True)
     srv.log_fp = log_fp
     srv.server_ip = args.server_ip
