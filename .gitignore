@@ -4,8 +4,12 @@ offline_install.sh
 payloads/user/utilities/PAGERCTL/__pycache__
 .DS_Store
 knowledge
-payloads/user/Skinny-Tools/att
-cross-compiled-pager-tools/wpad-wolfssl/
+# The ATT research/knowledge bundle lives under the payload dir and is private.
+# NOTE: macOS is case-insensitive, so `att` and `ATT` are the SAME directory;
+# ignore only the knowledge subtree, not the whole payload.
+payloads/user/Skinny-Tools/ATT/knowledge
+payloads/user/Skinny-Tools/ATT/.DS_Store
+payloads/user/Skinny-Tools/ATT/__pycache__
 payloads/user/Skinny-Tools/ATT-Both/
 payloads/user/Skinny-Tools/ATT-Connection/
 payloads/user/Skinny-Tools/ATT-Dryrun/

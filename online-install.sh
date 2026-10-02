@@ -277,6 +277,32 @@ if [ "$MODE" = "uninstall" ]; then
     done
   fi
 
+  # --- Phase U2.5: Tear down wpad-swap state and restore factory wpad ---
+  # The wpad-swap engine bind-mounts wolfssl over /usr/sbin/{wpad,hostapd,
+  # wpa_supplicant} only while active and installs libwolfssl additively.
+  # Restore stock first (so we never leave a half-mounted overlay behind),
+  # then remove the staged assets and the additive libwolfssl.
+  echo "[*] Restoring factory wpad and removing wpad-swap assets..."
+  if mount 2>/dev/null | grep -q " on /usr/sbin/wpad "; then
+    echo "    -> unmounting leftover wpad overlay(s)"
+    umount /usr/sbin/wpa_supplicant 2>/dev/null || umount -l /usr/sbin/wpa_supplicant 2>/dev/null || true
+    umount /usr/sbin/hostapd 2>/dev/null || umount -l /usr/sbin/hostapd 2>/dev/null || true
+    umount /usr/sbin/wpad 2>/dev/null || umount -l /usr/sbin/wpad 2>/dev/null || true
+  fi
+  # Restart wpad so the on-disk factory binary is the running one again.
+  /etc/init.d/wpad restart >/dev/null 2>&1 || true
+  wifi up >/dev/null 2>&1 || true
+  # Remove the additive libwolfssl (only if it is our known artifact).
+  if [ -f /usr/lib/libwolfssl.so.5.9.1.e624513f ]; then
+    rm -f /usr/lib/libwolfssl.so.5.9.1.e624513f
+    echo "    -> removed /usr/lib/libwolfssl.so.5.9.1.e624513f"
+  fi
+  if [ -d /mmc/root/wpad-swap ]; then
+    rm -rf /mmc/root/wpad-swap
+    echo "    -> removed /mmc/root/wpad-swap/"
+  fi
+  echo "[+] wpad-swap teardown complete (factory wpad restored)."
+
   # --- Phase U3: Remove pagerctl symlinks ---
   echo "[*] Removing PagerCTL hardware-interface symlinks..."
   PYTHON_SITE_DIR=""
@@ -298,6 +324,8 @@ if [ "$MODE" = "uninstall" ]; then
   echo "      ubertooth-utils)"
   echo "    - Custom payload directories under payloads/user/ and payloads/recon/"
   echo "    - PagerCTL hardware-interface symlinks"
+  echo "    - wpad-swap staged assets (/mmc/root/wpad-swap/) and the additive"
+  echo "      libwolfssl helper object (factory wpad is restored)"
   echo ""
   echo "[*] Preserved (not removed):"
   echo "    - Hak5 factory payloads (alerts/, recon/ factory entries,"
@@ -796,7 +824,8 @@ echo "[*] Scanning cross-compiled-pager-tools/ for cross-compiled .ipk packages.
 if [ ! -d "$CROSS_TOOLS_DIR" ]; then
   echo "[!] No cross-compiled-pager-tools/ directory in repo. Skipping .ipk install."
 else
-  IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f 2>/dev/null | sort)
+  IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f 2>/dev/null \
+                ! -path "*/wpad-wolfssl/*" | sort)
 
   if [ -z "$IPK_FILES" ]; then
     echo "[!] No .ipk files found under $CROSS_TOOLS_DIR. Skipping."
@@ -871,6 +900,66 @@ $ipk" ;;
       echo "[+] All .ipk packages installed successfully."
     fi
   fi
+fi
+
+# ==========================================
+# PHASE 3.5: wpad-swap asset staging (non-destructive Passpoint support)
+# ==========================================
+# The ATT/Passpoint payloads need wpad-wolfssl for its compiled-in Hotspot2.0 /
+# Interworking / EAP-AKA / EAP-SIM support. Installing wpad-wolfssl via opkg
+# would REMOVE the factory wpad-basic-mbedtls (it Conflicts:), breaking stock
+# Pager/PineAP behavior. Instead we extract the pinned wolfssl binaries into
+# /mmc/root/wpad-swap/ and install ONLY the libwolfssl shared object
+# additively; the wpad-swap engine bind-mounts the rest over /usr/sbin/*
+# on demand and always restores the factory wpad on exit.
+WPAD_ASSET_DIR="$CROSS_TOOLS_DIR/wpad-wolfssl"
+if [ -d "$WPAD_ASSET_DIR" ]; then
+  echo "[*] Staging wpad-swap (Passpoint) assets from $WPAD_ASSET_DIR..."
+  if ! command -v python3 >/dev/null 2>&1; then
+    : # staging shells out to tar; python3 not required here
+  fi
+  TMPSTAGE=$(mktemp -d /tmp/wpad-assets.XXXXXX)
+  # 1. extract the wolfssl ELF (wpad == hostapd == wpa_supplicant, argv[0] dispatch)
+  tar -xzOf "$WPAD_ASSET_DIR"/wpad-wolfssl_*.ipk ./data.tar.gz 2>/dev/null \
+    | tar -xzO ./usr/sbin/wpad > "$TMPSTAGE/wpad-wolfssl" 2>/dev/null
+  if [ -s "$TMPSTAGE/wpad-wolfssl" ]; then
+    cp "$TMPSTAGE/wpad-wolfssl" "$TMPSTAGE/hostapd-wolfssl"
+    cp "$TMPSTAGE/wpad-wolfssl" "$TMPSTAGE/wpa_supplicant-wolfssl"
+  fi
+  # 2. extract libwolfssl
+  tar -xzOf "$WPAD_ASSET_DIR"/libwolfssl5.9.1.e624513f_*.ipk ./data.tar.gz 2>/dev/null \
+    | tar -xzO ./usr/lib/libwolfssl.so.5.9.1.e624513f > "$TMPSTAGE/libwolfssl.so.5.9.1.e624513f" 2>/dev/null
+
+  if [ -s "$TMPSTAGE/wpad-wolfssl" ] && [ -s "$TMPSTAGE/libwolfssl.so.5.9.1.e624513f" ]; then
+    mkdir -p /mmc/root/wpad-swap
+    # Recompose (LF only) so the hashes match the engine's manifest.
+    for f in wpad-wolfssl hostapd-wolfssl wpa_supplicant-wolfssl \
+             libwolfssl.so.5.9.1.e624513f; do
+      cp "$TMPSTAGE/$f" /mmc/root/wpad-swap/$f 2>/dev/null || true
+    done
+    chmod 755 /mmc/root/wpad-swap/wpad-wolfssl \
+              /mmc/root/wpad-swap/hostapd-wolfssl \
+              /mmc/root/wpad-swap/wpa_supplicant-wolfssl 2>/dev/null || true
+    chmod 644 /mmc/root/wpad-swap/libwolfssl.so.5.9.1.e624513f 2>/dev/null || true
+    echo "[+] wpad-swap assets staged in /mmc/root/wpad-swap/"
+
+    # 3. hand verification + libwolfssl install to the engine (it validates the
+    #    pinned hashes and copies libwolfssl to /usr/lib additively).
+    ENGINE_SRC="$REPO_DIR/payloads/user/utilities/WPAD-SWAP/wpad-swap.sh"
+    if [ -f "$ENGINE_SRC" ]; then
+      ( cd "$REPO_DIR/payloads/user/utilities/WPAD-SWAP" && sh ./wpad-swap.sh stage ) \
+        && echo "[+] wpad-swap stage verified (libwolfssl installed additively)." \
+        || echo "[!] wpad-swap stage reported a verification failure; check the assets."
+    else
+      echo "[!] wpad-swap engine not found in repo; assets staged but not verified."
+    fi
+  else
+    echo "[!] Could not extract wpad-wolfssl assets from the vendored .ipk files."
+    echo "    Passpoint ATT modes will be unavailable until this is fixed."
+  fi
+  rm -rf "$TMPSTAGE"
+else
+  echo "[!] No cross-compiled-pager-tools/wpad-wolfssl/ directory; skipping Passpoint staging."
 fi
 
 # ==========================================

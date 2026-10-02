@@ -7,6 +7,58 @@ Welcome to the official Skinny R&D payload and utility repository for the Hak5 W
 * **pagerctl.py** - (brainphreak) Python translation layer for Pager hardware UI
 * **libpagerctl.so** - (brainphreak) Native shared library for hardware interface bindings for MIPS
 * **payloads** - Directory for Skinny-Pager-Payloads
+* **cross-compiled-pager-tools/wpad-wolfssl** - Pinned `wpad-wolfssl` + `libwolfssl` `.ipk`s for the non-destructive wpad hot-swap (see below)
+
+
+## wpad Hot-Swap (Passpoint / ATT payloads)
+
+The Pager's factory `wpad` is Hak5's patched **`wpad-basic-mbedtls`**, which
+strips **Passpoint / Hotspot 2.0 / Interworking / EAP-AKA / EAP-SIM** support.
+The ATT-Hotspot2 payloads need **`wpad-wolfssl`** for those features.
+
+`wpad-swap.sh` (`payloads/user/utilities/WPAD-SWAP/`) is a **non-destructive
+hot-swap engine** that lets those payloads run without giving up stock Pager
+functionality:
+
+* The factory `/usr/sbin/wpad` file is **never modified on disk**. The wolfssl
+  binary set is staged in `/mmc/root/wpad-swap/` and **bind-mounted** over
+  `/usr/sbin/{wpad,hostapd,wpa_supplicant}` only while active.
+* `libwolfssl` is installed **additively** to `/usr/lib` (inert for the stock
+  build, removed on uninstall).
+* Every swap **hash-verifies** the running binary and auto-rolls-back to stock
+  on mismatch. `run -- <cmd>` wraps a payload with an `EXIT/INT/TERM/HUP` trap
+  that **always restores stock**.
+* **Rebooting is a universal undo**: bind mounts do not survive a reboot, so the
+  Pager always returns to factory `wpad-basic-mbedtls`. `wpad-swap.sh recover`
+  force-restores factory state without a reboot.
+
+The installer stages the pinned assets offline; it never runs `opkg install
+wpad-wolfssl` (that would remove the factory package).
+
+```
+# Manual control (Pager UI: Utilities -> WPAD-SWAP, or CLI)
+wpad-swap.sh status            # show stock/active/running state
+wpad-swap.sh wolfssl           # activate wpad-wolfssl (Passpoint capable)
+wpad-swap.sh stock             # restore factory wpad-basic-mbedtls
+wpad-swap.sh run -- <command>  # activate, run, and ALWAYS restore stock
+wpad-swap.sh recover           # force factory state (self-healing)
+```
+
+> Run swaps over **USB-C Ethernet (br-lan)**, serial, or on-Pager tmux -- a
+> `wpad` restart drops a Wi-Fi SSH session. The engine refuses to swap over a
+> Wi-Fi session unless forced.
+
+### ATT-Hotspot2-Tracker (`payloads/user/Skinny-Tools/ATT/`)
+
+* **ATT-Hotspot2-Tracker** - Finds hidden AT&T iPhones in secure facilities via
+  a **connection** path (open `attwifi` BSS + IE-221 + WISPr captive portal +
+  DHCP, so the phone fully associates and gets a pingable IP) or a **pseudonym**
+  path (a Passpoint/HS2.0 enterprise BSS pointed at a local rejecting RADIUS,
+  so the phone returns an EAP-AKA' pseudonym used to correlate randomized MACs
+  to one device). Modes: `connection`, `pseudonym`, `both`, `hybrid`. Passpoint
+  modes use the wpad-swap engine and always restore factory wpad on exit.
+  Loot: `/mmc/root/loot/att-hotspot2-tracker/`. Requires `python3`.
+
 
 
 ## Custom Payloads
