@@ -59,6 +59,7 @@ import argparse
 import atexit
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -979,7 +980,7 @@ def iphone_probe(ip):
     return "no"
 
 
-def alert_connect(mac, ip, log_fp):
+def alert_connect(mac, ip, log_fp, rssi=""):
     """Best-effort identity for a device that just joined `attwifi`, then ALERT."""
     maclc = mac.lower()
     if not ip or ip == "-":
@@ -1023,19 +1024,26 @@ def alert_connect(mac, ip, log_fp):
             "random MAC" if is_random_mac(mac) else "unknown")
     man = man or "Unknown"
     maclabel = "MAC(R)" if is_random_mac(mac) else "MAC"
+    # Normalise the raw `iw` line ("signal:  -46 [-50, -47] dBm") to just dBm.
+    m = re.search(r"signal:\s*(-?\d+)", rssi)
+    rssi = f"{m.group(1)} dBm" if m else (rssi or "?")
 
     tag = " (iPhone)" if iphone == "yes" else ""
-    log(f"[alert] {name} {mac} {ip} man={man} iphone={iphone}", log_fp)
+    log(f"[alert] {name} {mac} {ip} man={man} iphone={iphone} rssi={rssi}", log_fp)
     shell_out(f"LOG green 'attwifi: {name} ({mac})' 2>/dev/null")
     alert_txt = (f"attwifi connect!{tag}\\n\\n Dev Name: {name}\\n"
-                 f" {maclabel}: {mac}\\n SSID: {AP_OPEN} attwifi (matched)\\n man: {man}")
+                 f" {maclabel}: {mac}\\n IP: {ip}\\n SSID: attwifi (matched)\\n"
+                 f" man: {man}\\n signal: {rssi}")
     subprocess.run(["ALERT", alert_txt], check=False)
 
+    # Loot: everything the alert shows, plus a greppable RSSI field.
     loot = os.path.join(LOG_DIR, datetime.now().strftime("%Y%m%d-attwifi-connect.log"))
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         with open(loot, "a") as f:
-            f.write(f"{ts()} | {name} | {mac} | attwifi | {ip} | {man} | iPhone:{iphone}\n")
+            f.write(f"{ts()} | Dev Name: {name} | {maclabel}: {mac} | "
+                    f"IP: {ip} | SSID: attwifi | man: {man} | signal: {rssi} | "
+                    f"iPhone: {iphone}\n")
     except OSError:
         pass
     return name, man, iphone
@@ -1093,7 +1101,7 @@ def loop(args, log_fp, radius, wispr):
             if mac not in alerted:
                 alerted.add(mac)
                 try:
-                    alert_connect(mac, lease_field(mac, 3), log_fp)
+                    alert_connect(mac, lease_field(mac, 3), log_fp, rssi)
                 except Exception as e:
                     log(f"[alert] error: {e}", log_fp)
         # forget departed MACs so a reconnect alerts again
