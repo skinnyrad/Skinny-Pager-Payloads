@@ -20,8 +20,14 @@
 #         local clone) get the same updates as users who maintain a
 #         full clone - and they no longer have to remember to
 #         `git pull` between runs.
-#   2.  Pre-flight dependency check (tcpdump, aircrack-ng, python3)  [S/B only]
+#   2.  Pre-flight dependency check + provisioning               [S/B only]
+#         Mandatory (hard-fails if any remain missing): python3
+#         (+ ctypes/http/email/urllib stdlib mods), aircrack-ng,
+#         tcpdump, sqlite3-cli, hostapd-utils, umdns, bluez-utils,
+#         bluez-utils-btmon, bluez-tools, hcxtools, nftables-json,
+#         kmod-mt76-usb.
 #   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/  [S/B only]
+#   3.5 wpad-swap asset staging (Passpoint / ATT)                  [S/B only]
 #   4.  Payload tree mirror with new-payload detection  [S/B only]
 #   5.  Global pagerctl hardware-interface symlinks  [S/B only]
 #   6.  Verification & summary  [S/B only]
@@ -334,11 +340,17 @@ if [ "$MODE" = "uninstall" ]; then
   echo "      libubertooth, ...) - these are general-purpose system libs"
   echo "      that other Pager workflows may rely on"
   echo "    - System packages installed by the pre-flight phase:"
-  echo "        python3, aircrack-ng, tcpdump, libpcap, libopenssl, libffi,"
+  echo "        python3 (+ python3-ctypes/-email/-urllib/-logging/-decimal/-codecs),"
+  echo "        aircrack-ng, tcpdump, sqlite3-cli, hostapd-utils, umdns,"
+  echo "        bluez-utils, bluez-utils-btmon, bluez-tools, hcxtools,"
+  echo "        nftables-json, kmod-mt76-usb, libpcap, libopenssl, libffi,"
   echo "        libbz2, zlib, libpcre2, libnl-core200, libnl-genl200"
   echo "      To fully remove these, run manually:"
-  echo "        opkg remove python3 aircrack-ng tcpdump libpcap libopenssl \\"
-  echo "                 libffi libbz2 zlib libpcre2 libnl-core200 libnl-genl200 \\"
+  echo "        opkg remove python3 python3-ctypes python3-email python3-urllib \\"
+  echo "                 aircrack-ng tcpdump sqlite3-cli hostapd-utils umdns \\"
+  echo "                 bluez-utils bluez-utils-btmon bluez-tools hcxtools \\"
+  echo "                 nftables-json libpcap libopenssl libffi libbz2 zlib \\"
+  echo "                 libpcre2 libnl-core200 libnl-genl200 \\"
   echo "                 librtlsdr libbtbb libubertooth"
   echo ""
   echo "[*] The Pager is back to its pre-Skinny-Tools state."
@@ -437,7 +449,7 @@ merge_payload_category() {
     if [ -d "$dst" ]; then
       flag="$MERGE_TMP/$name.updated"
       : > "$flag"
-      ( cd "$entry" && find . -type f ) | while IFS= read -r f; do
+      ( cd "$entry" && find . -type f ! -name '._*' ! -name '.DS_Store' ) | while IFS= read -r f; do
         if [ ! -e "$dst/$f" ]; then
           mkdir -p "$dst/$(dirname "$f")"
           cp "$entry/$f" "$dst/$f"
@@ -459,6 +471,10 @@ merge_payload_category() {
     else
       mkdir -p "$dst"
       if cp -r "$entry/." "$dst/" 2>/dev/null; then
+        # Strip macOS AppleDouble (`._*`) sidecars and .DS_Store that may
+        # have been copied along, so they never appear as bogus payload files.
+        find "$dst" -name '._*' -type f -exec rm -f {} \; 2>/dev/null
+        find "$dst" -name '.DS_Store' -type f -exec rm -f {} \; 2>/dev/null
         MERGE_NEW_LABELS="${MERGE_NEW_LABELS}${MERGE_NEW_LABELS:+ }$full_label"
         echo "[NEW PAYLOAD] $full_label"
       else
@@ -493,7 +509,7 @@ count_missing_files() {
   # after the pipeline fork. A subshell `cd` would leave the parent in
   # its original CWD, making the relative "./foo" paths unresolvable
   # by sha256_file below.
-  find "$src_root" -type f | while IFS= read -r src; do
+  find "$src_root" -type f ! -name '._*' ! -name '.DS_Store' | while IFS= read -r src; do
     rel="${src#"$src_root"/}"
     [ ! -e "$dst_root/$rel" ] && echo x
   done | wc -l
@@ -512,7 +528,7 @@ count_updated_files() {
   src_root="${src_root%/}"
   # Absolute paths from `find $src_root` (see count_missing_files for
   # why we don't use a subshell cd here).
-  find "$src_root" -type f | while IFS= read -r src; do
+  find "$src_root" -type f ! -name '._*' ! -name '.DS_Store' | while IFS= read -r src; do
     rel="${src#"$src_root"/}"
     dst="$dst_root/$rel"
     [ -e "$dst" ] || continue
@@ -761,34 +777,102 @@ fi
 # selected. Hak5 is just a payload pull, so it doesn't need python3,
 # airodump-ng, the cross-compiled tools, or the PagerCTL shims.
 if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
-echo "[*] Running pre-flight dependency check (tcpdump, aircrack-ng, python3)..."
+# --------------------------------------------------------------------------
+# Dependency inventory (what the repo's payloads actually require)
+# --------------------------------------------------------------------------
+# ALL of these are MANDATORY. A missing tool or python3 module is a hard
+# failure (non-zero exit) so a run can never "succeed" with a payload that
+# will fail on the Pager.
+#
+# tools/binaries:
+#   python3          foxhunt_AP/clients, ATT, PNL beacon-flood, PagerCTL
+#   aircrack-ng      Aireplay-ng-AP-Deauth, foxhunt_AP/clients (airodump-ng)
+#   tcpdump          PNL-Beacon-Lure, ATT sniffer
+#   sqlite3          PMF-Checker, StripConnectedClients, StripOpenAP, TopProbed
+#   hostapd_cli      PNL-Beacon-Lure (hostapd_multi), ATT
+#   nft              ATT v28_nat.sh
+#   whoismac         StripConnectedClients, PNL-Beacon-Lure vendor lookup
+#   btmon/hcitool    Skinny-Skim-Scanner (Bluetooth Classic + BLE)
+#   hciconfig        Skinny-Skim-Scanner
+#   umdns            CatchAndRelease mDNS display names
+#
+# python3 stdlib modules (OpenWrt splits these out of python3-light):
+#   ctypes           PagerCTL, foxhunt_AP/clients  -> python3-ctypes
+#   http.server      ATT v28_wispr.py              -> python3-email + python3-urllib
+#   logging/decimal/codecs  transitive of the above
+#   (argparse/re/socket/struct/zlib/select/hashlib/hmac/threading are in
+#    python3-light/python3-base)
+# --------------------------------------------------------------------------
 
-MISSING=""
-for tool in tcpdump aircrack-ng python3; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    MISSING="$MISSING $tool"
-  fi
+REQUIRED_PKGS="python3 python3-base python3-light python3-ctypes \
+               python3-email python3-urllib python3-logging python3-decimal \
+               python3-codecs libffi libbz2-1.0 zlib libpcap libopenssl \
+               libpcre2 libnl-core200 libnl-genl200 sqlite3-cli hostapd-utils \
+               aircrack-ng tcpdump umdns bluez-utils bluez-utils-btmon \
+               bluez-tools hcxtools nftables-json kmod-mt76-usb"
+
+# Binaries that must all exist after provisioning. Keep this in sync with the
+# packages above -- the verification loop below hard-fails if any are absent.
+REQUIRED_BINS="tcpdump aircrack-ng airodump-ng aireplay-ng python3 sqlite3 \
+hostapd_cli nft whoismac btmon hcitool hciconfig"
+REQUIRED_MODS="ctypes http.server email urllib.request re socket struct zlib \
+select hashlib hmac threading argparse"
+
+echo "[*] Running pre-flight dependency check..."
+echo "[*] Verifying required tools ..."
+MISSING_TOOLS=""
+for tool in $REQUIRED_BINS; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS="$MISSING_TOOLS $tool"
 done
 
-if [ -z "$MISSING" ]; then
-  echo "[+] All critical tools present. Skipping pre-flight install."
+echo "[*] Verifying required python3 modules ..."
+MISSING_MODS=""
+for m in $REQUIRED_MODS; do
+  python3 -c "import $m" >/dev/null 2>&1 || MISSING_MODS="$MISSING_MODS $m"
+done
+
+if [ -z "$MISSING_TOOLS" ] && [ -z "$MISSING_MODS" ]; then
+  echo "[+] All required tools and python3 modules present."
 else
-  echo "[*] Missing tools detected:$MISSING"
+  [ -n "$MISSING_TOOLS" ] && echo "[*] Missing tools:$MISSING_TOOLS"
+  [ -n "$MISSING_MODS" ]  && echo "[*] Missing python3 modules:$MISSING_MODS"
   echo "[*] Synchronizing OpenWrt package ecosystem lists..."
   opkg update || { echo "[-] Critical Error: opkg update failed!"; exit 1; }
-  echo "[*] Provisioning Python3 framework, wireless stack, and missing tools..."
-  opkg install python3 python3-base python3-light libffi libbz2-1.0 \
-              zlib libpcap libopenssl libpcre2 libnl-core200 libnl-genl200 \
-              aircrack-ng tcpdump
-  STILL_MISSING=""
-  for tool in tcpdump aircrack-ng python3; do
-    command -v "$tool" >/dev/null 2>&1 || STILL_MISSING="$STILL_MISSING $tool"
+  echo "[*] Provisioning Python3 framework, wireless stack, and required tools..."
+  # shellcheck disable=SC2086
+  opkg install $REQUIRED_PKGS
+  # Re-verify -- every dependency is mandatory, so any remaining gap aborts.
+  STILL_TOOLS=""
+  for tool in $REQUIRED_BINS; do
+    command -v "$tool" >/dev/null 2>&1 || STILL_TOOLS="$STILL_TOOLS $tool"
   done
-  if [ -n "$STILL_MISSING" ]; then
-    echo "[-] Critical Error: tools still missing after install:$STILL_MISSING"
+  STILL_MODS=""
+  for m in $REQUIRED_MODS; do
+    python3 -c "import $m" >/dev/null 2>&1 || STILL_MODS="$STILL_MODS $m"
+  done
+  if [ -n "$STILL_TOOLS" ] || [ -n "$STILL_MODS" ]; then
+    echo "[-] Critical Error: still missing after install:"
+    [ -n "$STILL_TOOLS" ] && echo "      tools:$STILL_TOOLS"
+    [ -n "$STILL_MODS" ]  && echo "      modules:$STILL_MODS"
+    echo "    These are mandatory; refusing to continue with a partial install."
     exit 1
   fi
-  echo "[+] Pre-flight dependency check satisfied."
+  echo "[+] Required dependencies satisfied."
+fi
+
+# Seed the hcxtools OUI database that `whoismac` reads from ~/.hcxtools/oui.txt.
+# StripConnectedClients (and PNL's whoismac fallback) call `whoismac -m`, which
+# fails with "failed read oui.txt" unless ~/.hcxtools/oui.txt exists. The Pager
+# ships a factory OUI DB at /lib/hak5/oui.txt (tab-separated, same format), so
+# seed from it when the user's copy is missing.
+if command -v whoismac >/dev/null 2>&1; then
+  if [ ! -s "$HOME/.hcxtools/oui.txt" ] && [ -s /lib/hak5/oui.txt ]; then
+    mkdir -p "$HOME/.hcxtools"
+    cp /lib/hak5/oui.txt "$HOME/.hcxtools/oui.txt"
+    echo "[+] Seeded ~/.hcxtools/oui.txt from /lib/hak5/oui.txt (whoismac vendor lookup)."
+  else
+    echo "[+] whoismac OUI database present."
+  fi
 fi
 
 # Dynamically locate the newly active Python site-packages folder
@@ -799,23 +883,6 @@ if [ -z "$PYTHON_SITE_DIR" ]; then
 fi
 echo "[+] Target Python Environment Verified: $PYTHON_SITE_DIR"
 
-# Verify core sniffing framework availability
-if ! command -v airodump-ng >/dev/null 2>&1; then
-    echo "[-] Critical Error: airodump-ng suite setup verification failed!"
-    exit 1
-fi
-
-# Optional: umdns lets the CatchAndRelease alert resolve devices' real mDNS
-# display names (e.g. "Jeff’s MacBook Pro" / "Josh’s iPhone"). Not required -
-# the payload falls back to DHCP hostname/vendor without it - so a failure
-# here is non-fatal.
-if ! command -v umdns >/dev/null 2>&1; then
-  echo "[*] Installing umdns (mDNS name resolution for CatchAndRelease)..."
-  opkg update >/dev/null 2>&1
-  opkg install umdns >/dev/null 2>&1 \
-    || echo "[!] umdns install failed; CatchAndRelease will use DHCP/vendor names."
-fi
-
 # ==========================================
 # PHASE 3: Cross-Compiled .ipk Discovery & Install
 # ==========================================
@@ -824,7 +891,7 @@ echo "[*] Scanning cross-compiled-pager-tools/ for cross-compiled .ipk packages.
 if [ ! -d "$CROSS_TOOLS_DIR" ]; then
   echo "[!] No cross-compiled-pager-tools/ directory in repo. Skipping .ipk install."
 else
-  IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f 2>/dev/null \
+  IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f ! -name "._*" 2>/dev/null \
                 ! -path "*/wpad-wolfssl/*" | sort)
 
   if [ -z "$IPK_FILES" ]; then
@@ -1027,7 +1094,7 @@ if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
       # sha256_file - the subshell cd would orphan the relative paths.
       LOCAL_PAYLOADS_DIR="${LOCAL_PAYLOADS_DIR%/}"
       find "$LOCAL_PAYLOADS_DIR" -type d -exec mkdir -p "$SYSTEM_PAYLOADS_DEST/{}" \; 2>/dev/null
-      find "$LOCAL_PAYLOADS_DIR" -type f | while IFS= read -r src; do
+      find "$LOCAL_PAYLOADS_DIR" -type f ! -name '._*' ! -name '.DS_Store' | while IFS= read -r src; do
           rel="${src#"$LOCAL_PAYLOADS_DIR"/}"
           dst="$SYSTEM_PAYLOADS_DEST/$rel"
           if [ ! -e "$dst" ]; then
@@ -1040,6 +1107,10 @@ if [ -d "$LOCAL_PAYLOADS_DIR" ]; then
         done
       # Enforce global executable permissions across launcher scripts
       find "$SYSTEM_PAYLOADS_DEST" -name "*.sh" -exec chmod +x {} \;
+      # Purge macOS AppleDouble sidecars / .DS_Store that may have been left
+      # by a previous run (or copied in by an older installer version).
+      find "$SYSTEM_PAYLOADS_DEST" -name '._*' -type f -exec rm -f {} \; 2>/dev/null
+      find "$SYSTEM_PAYLOADS_DEST" -name '.DS_Store' -type f -exec rm -f {} \; 2>/dev/null
       echo "[+] Payloads successfully synced to $SYSTEM_PAYLOADS_DEST/"
     fi
 

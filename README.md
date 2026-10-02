@@ -149,6 +149,37 @@ The hardware mapping utilities (`pagerctl.py` and `libpagerctl.so`) included in 
 
 Skinny R&D utilizes this framework to drive direct Python interactions with the Pager's display buffers for several fox hunting payloads. This direct integration provides the reduced latency and faster screen refresh performance critical for real-time signal tracking and foxhunting operations. Pagerctl is not used for all payloads.
 
+#### Runtime dependencies provisioned by `online-install.sh`
+
+**All dependencies are mandatory** — the installer verifies every one and
+**hard-fails** (non-zero exit) if any tool or Python module is still missing
+after provisioning, so a successful run guarantees every payload works.
+OpenWrt splits the Python standard library, so several `python3-*` packages
+beyond `python3-light` are required.
+
+| Dependency | Package(s) | Used by |
+|---|---|---|
+| Python 3 runtime | `python3`, `python3-base`, `python3-light` | all Python payloads |
+| `ctypes` | `python3-ctypes` | PagerCTL, foxhunt_AP, foxhunt_clients |
+| `http.server`, `email`, `urllib` | `python3-email`, `python3-urllib`, `python3-logging`, `python3-decimal`, `python3-codecs` | ATT (`v28_wispr.py`) |
+| wireless stack | `libnl-core200`, `libnl-genl200` | foxhunt, Quick-Brown-Fox, trackers |
+| `aircrack-ng` (`airodump-ng`, `aireplay-ng`) | `aircrack-ng` | deauth, foxhunt_AP/clients |
+| `tcpdump` | `tcpdump`, `libpcap` | PNL-Beacon-Lure, ATT |
+| `sqlite3` CLI | `sqlite3-cli` | PMF-Checker, StripConnectedClients, StripOpenAP, TopProbed |
+| `hostapd_cli` | `hostapd-utils` | PNL-Beacon-Lure, ATT |
+| OUI vendor lookup | `hcxtools` (+ seeded `~/.hcxtools/oui.txt` from `/lib/hak5/oui.txt`) | StripConnectedClients, PNL-Beacon-Lure |
+| mDNS device names | `umdns` | CatchAndRelease |
+| Bluetooth Classic + BLE | `bluez-utils`, `bluez-utils-btmon`, `bluez-tools` | Skinny-Skim-Scanner (`btmon`, `hcitool`, `hciconfig`, `lescan`) |
+| NAT/transparent proxy | `nftables-json` | ATT (`v28_nat.sh`) |
+| External MediaTek radios | `kmod-mt76-usb` | Auto-MediaTek-Loader |
+| crypto/zlib | `libopenssl`, `libffi`, `libbz2-1.0`, `zlib`, `libpcre2` | Python, handshake tooling |
+| RTL-SDR / Ubertooth tools | vendored `.ipk`s | rtl_433, Ubertooth payloads |
+| Passpoint wpad | vendored `wpad-wolfssl` + `libwolfssl` (staged, not opkg-installed) | ATT pseudonym/both/hybrid |
+
+The installer also seeds `/root/.hcxtools/oui.txt` from the factory
+`/lib/hak5/oui.txt` so `whoismac -m` (used by StripConnectedClients) works.
+
+
 
 
 ---
