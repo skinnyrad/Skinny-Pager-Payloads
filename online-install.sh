@@ -25,7 +25,8 @@
 #         (+ ctypes/http/email/urllib stdlib mods), aircrack-ng,
 #         tcpdump, sqlite3-cli, hostapd-utils, umdns, bluez-utils,
 #         bluez-utils-btmon, bluez-tools, hcxtools, nftables-json,
-#         kmod-mt76-usb.
+#         kmod-mt76-usb, iw, libev, scapy; plus avahi-daemon installed
+#         to /mmc for the AWDL-Stim (Apple AWDL) lure.
 #   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/  [S/B only]
 #   3.5 wpad-swap asset staging (Passpoint / ATT)                  [S/B only]
 #   4.  Payload tree mirror with new-payload detection  [S/B only]
@@ -158,7 +159,10 @@ if [ "$MODE" = "uninstall" ]; then
   if [ ! -d "$CROSS_TOOLS_DIR" ]; then
     echo "[!] No cross-compiled-pager-tools/ directory in repo. Skipping."
   else
-    IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f ! -name "._*" 2>/dev/null | sort)
+    # Exclude the vendored awdl/ and wpad-wolfssl/ .ipk's (handled separately;
+    # see the install path for details).
+    IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f ! -name "._*" 2>/dev/null \
+                  ! -path "*/wpad-wolfssl/*" ! -path "*/awdl/*" | sort)
     if [ -z "$IPK_FILES" ]; then
       echo "[!] No .ipk files found in $CROSS_TOOLS_DIR. Skipping."
     else
@@ -344,14 +348,18 @@ if [ "$MODE" = "uninstall" ]; then
   echo "        aircrack-ng, tcpdump, sqlite3-cli, hostapd-utils, umdns,"
   echo "        bluez-utils, bluez-utils-btmon, bluez-tools, hcxtools,"
   echo "        nftables-json, kmod-mt76-usb, libpcap, libopenssl, libffi,"
-  echo "        libbz2, zlib, libpcre2, libnl-core200, libnl-genl200"
+  echo "        libbz2, zlib, libpcre2, libnl-core200, libnl-genl200,"
+  echo "        iw, libev, scapy, and avahi-nodbus-daemon + libavahi-nodbus-support"
+  echo "        (installed to /mmc for the AWDL-Stim lure)"
   echo "      To fully remove these, run manually:"
   echo "        opkg remove python3 python3-ctypes python3-email python3-urllib \\"
   echo "                 aircrack-ng tcpdump sqlite3-cli hostapd-utils umdns \\"
   echo "                 bluez-utils bluez-utils-btmon bluez-tools hcxtools \\"
   echo "                 nftables-json libpcap libopenssl libffi libbz2 zlib \\"
   echo "                 libpcre2 libnl-core200 libnl-genl200 \\"
+  echo "                 iw libev scapy \\"
   echo "                 librtlsdr libbtbb libubertooth"
+  echo "        opkg remove -d mmc avahi-nodbus-daemon libavahi-nodbus-support"
   echo ""
   echo "[*] The Pager is back to its pre-Skinny-Tools state."
   exit 0
@@ -795,6 +803,9 @@ if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
 #   btmon/hcitool    Skinny-Skim-Scanner (Bluetooth Classic + BLE)
 #   hciconfig        Skinny-Skim-Scanner
 #   umdns            CatchAndRelease mDNS display names
+#   iw               AWDL-Stim monitor-vif creation (and general payload use)
+#   avahi-daemon     AWDL-Stim AirPlay lure (installed to /mmc - see below)
+#   libev            owl (AWDL-Stim peer binary) links libev.so.4
 #
 # python3 stdlib modules (OpenWrt splits these out of python3-light):
 #   ctypes           PagerCTL, foxhunt_AP/clients  -> python3-ctypes
@@ -802,6 +813,9 @@ if [ "$SELECTION" = "S" ] || [ "$SELECTION" = "B" ]; then
 #   logging/decimal/codecs  transitive of the above
 #   (argparse/re/socket/struct/zlib/select/hashlib/hmac/threading are in
 #    python3-light/python3-base)
+#
+# python3 packages (not stdlib):
+#   scapy            AWDL-Stim observer (awdl_log.py), ATT rssi-tracker
 # --------------------------------------------------------------------------
 
 REQUIRED_PKGS="python3 python3-base python3-light python3-ctypes \
@@ -809,14 +823,15 @@ REQUIRED_PKGS="python3 python3-base python3-light python3-ctypes \
                python3-codecs libffi libbz2-1.0 zlib libpcap libopenssl \
                libpcre2 libnl-core200 libnl-genl200 sqlite3-cli hostapd-utils \
                aircrack-ng tcpdump umdns bluez-utils bluez-utils-btmon \
-               bluez-tools hcxtools nftables-json kmod-mt76-usb"
+               bluez-tools hcxtools nftables-json kmod-mt76-usb \
+               iw libev scapy"
 
 # Binaries that must all exist after provisioning. Keep this in sync with the
 # packages above -- the verification loop below hard-fails if any are absent.
 REQUIRED_BINS="tcpdump aircrack-ng airodump-ng aireplay-ng python3 sqlite3 \
-hostapd_cli nft whoismac btmon hcitool hciconfig"
+hostapd_cli nft whoismac btmon hcitool hciconfig iw"
 REQUIRED_MODS="ctypes http.server email urllib.request re socket struct zlib \
-select hashlib hmac threading argparse"
+select hashlib hmac threading argparse scapy"
 
 echo "[*] Running pre-flight dependency check..."
 echo "[*] Verifying required tools ..."
@@ -860,6 +875,24 @@ else
   echo "[+] Required dependencies satisfied."
 fi
 
+# --------------------------------------------------------------------------
+# AWDL-Stim (Apple AWDL stimulation) extra dependency: avahi-daemon on /mmc
+# --------------------------------------------------------------------------
+# The AWDL Stim payload advertises a fake AirPlay2/AirPlay service to draw
+# nearby iPhones, and its wake script invokes the daemon by absolute path
+# (/mmc/usr/sbin/avahi-daemon). avahi must therefore be installed to the
+# /mmc dest (not the root overlay). Install the daemon and its support
+# library together so the dynamic loader finds libavahi on /mmc/usr/lib.
+if [ ! -x /mmc/usr/sbin/avahi-daemon ]; then
+  echo "[*] Provisioning avahi-daemon to /mmc (AWDL-Stim AirPlay lure)..."
+  opkg install -d mmc avahi-nodbus-daemon libavahi-nodbus-support || true
+fi
+if [ -x /mmc/usr/sbin/avahi-daemon ]; then
+  echo "[+] avahi-daemon present on /mmc (AWDL-Stim lure ready)."
+else
+  echo "[!] Warning: avahi-daemon is not on /mmc; AWDL-Stim's lure will not start."
+fi
+
 # Seed the hcxtools OUI database that `whoismac` reads from ~/.hcxtools/oui.txt.
 # StripConnectedClients (and PNL's whoismac fallback) call `whoismac -m`, which
 # fails with "failed read oui.txt" unless ~/.hcxtools/oui.txt exists. The Pager
@@ -891,8 +924,13 @@ echo "[*] Scanning cross-compiled-pager-tools/ for cross-compiled .ipk packages.
 if [ ! -d "$CROSS_TOOLS_DIR" ]; then
   echo "[!] No cross-compiled-pager-tools/ directory in repo. Skipping .ipk install."
 else
+  # NOTE: */awdl/* and */wpad-wolfssl/* are excluded. The awdl .ipk's are
+  # vendored only for the OFFLINE installer; online installs get iw/libev/
+  # scapy from the OpenWrt feed and avahi to /mmc (see the AWDL-Stim block
+  # in Phase 2). Installing them from here would land avahi on the root
+  # overlay, which the AWDL-Stim payload does not use.
   IPK_FILES=$(find "$CROSS_TOOLS_DIR" -name "*.ipk" -type f ! -name "._*" 2>/dev/null \
-                ! -path "*/wpad-wolfssl/*" | sort)
+                ! -path "*/wpad-wolfssl/*" ! -path "*/awdl/*" | sort)
 
   if [ -z "$IPK_FILES" ]; then
     echo "[!] No .ipk files found under $CROSS_TOOLS_DIR. Skipping."
