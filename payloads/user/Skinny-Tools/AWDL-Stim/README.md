@@ -6,24 +6,30 @@
 
 ---
 
-## Bottom line up front (TSCM: why this beats Wi-Fi probes for iPhone hunting)
+## Bottom line up front (TSCM: AWDL as a second, complementary discovery surface)
 
-Infrastructure **probe requests** are a bad way to hunt modern iPhones: the phone
-only probes for SSIDs it already remembers, it throttles probes heavily when it is
-idle or locked, and iOS blanks/truncates the Preferred Network List so the probes
-carry almost no identifying information. An idle phone in a pocket is often
-**silent** on the probe channel.
+**Probe-request hunting is not bad, and this does not replace it — ideally you run
+both.** Probe hunting is a direct signal whenever a device is actively probing, but
+it is user-data-driven: the phone only probes for SSIDs it already remembers, it
+throttles probing when idle or locked, and iOS blanks/truncates the Preferred
+Network List — so an idle, locked phone can be quiet on the probe channel.
 
-**AWDL is the opposite.** It is a *scheduled presence protocol*, not a
-user-activity-driven one. To remain reachable for AirDrop / AirPlay / Handoff /
-Continuity / Instant Hotspot, an iPhone continuously (duty-cycled, several times a
-second) broadcasts AWDL presence frames that carry its AWDL MAC in the clear — no
-known SSID required, no user interaction required, and *independent of lock/screen
-state*. That makes AWDL a **near-continuous** "is there a powered Apple device here,
-and how close is it (RSSI)" sensor, where probing is intermittent at best.
+**AWDL is simply a different discovery surface** on the same Wi-Fi radio, and it
+often *chatters* more than probing does. Because AirDrop / AirPlay / Handoff /
+Continuity / Instant Hotspot need peers to be findable, Apple devices periodically
+emit AWDL presence frames that carry an (AWDL) MAC — no known SSID required, no user
+interaction required, and independent of lock/screen state.
 
-**Bottom line:** for *detecting and ranging* an iPhone, AWDL presence is a more
-reliable, always-on signal than Wi-Fi probing; probing is a weak fallback. AWDL is
+Two things to be clear about, because they're easy to overstate:
+
+- AWDL is **not constant**. It duty-cycles — it comes and goes — so a device can be
+  silent for stretches and then chatter for a while.
+- We have **no control** over whether, how often, or when a device speaks. We are
+  not making phones talk and we are not "hearing" them; we are watching a **different
+  protocol** where they tend to be chattier *when they do*.
+
+**Bottom line:** AWDL adds a second, often chattier place to look for Apple devices
+(including idle/locked ones that probing can miss), alongside probe hunting. It is
 weaker at *naming* the device (that needs mDNS/Bonjour enrichment, see caveats).
 
 ---
@@ -57,14 +63,15 @@ infrastructure (AP/client) mode and **not** Wi-Fi scanning:
 - It is **completely independent of any access point or SSID.** The payload does
   **not** connect to, associate with, or depend on any infrastructure network. It
   needs **no known SSIDs** and no PNL.
-- An iPhone keeps AWDL running by **time-slicing its own radio** — the same chip
-  alternates between infrastructure traffic and the AWDL peer schedule. So a phone
-  that is happily connected to some AP still emits AWDL, and an idle/locked phone
-  still emits AWDL, as long as its Wi-Fi radio is on.
+- An iPhone runs AWDL alongside its infrastructure connection by **time-slicing its
+  own radio** — the same chip alternates between infrastructure traffic and the AWDL
+  peer schedule. So a phone that is connected to an AP, or idle/locked, can still
+  emit AWDL — as long as its Wi-Fi radio is on and it takes part in the AWDL
+  schedule.
 
-That is the key TSCM distinction: you are not waiting for the phone to *ask* for a
-network; you are listening on a channel where Apple devices *must* periodically
-announce themselves to stay discoverable to each other.
+The distinction for TSCM: you are not waiting for the phone to *ask* for a network;
+you are observing a channel where Apple devices announce themselves to stay
+discoverable to each other.
 
 ---
 
@@ -102,43 +109,96 @@ AWDL is master-driven, and the three mechanisms below are one loop:
 2. **Master election.** Every node advertises a **master rank** (primarily a link
    quality/metric — e.g. based on the best peer RSSI — plus a counter). The node
    with the strongest rank becomes **master**; the others become **followers**.
-   Ties are broken by rank parameters, and the election is re-run continuously as
-   nodes come and go.
+   Ties are broken by rank parameters; the election re-runs as nodes come and go.
 3. **Synchronization & hopping.** The **master dictates the schedule**: it sends
    **synchronization frames** that define the timing of the availability windows
    and the **channel sequence**. Followers **align** their windows and **hop** to
    the master's channel at the master's times, so the whole cluster transmits on the
    same channel at the same moment and then hops together.
 
-`owl` plays in this game deliberately: by emitting PSF/MIF it either **joins an
-existing cluster** or **elects itself master**, which forces nearby iPhones onto its
-schedule — and while they are aligned, they are audible and raisable.
+`owl` takes part in this loop: by emitting PSF/MIF it either **joins an existing
+cluster** or (if it wins the election) becomes **master**, which gives nearby iPhones
+a schedule they *may* choose to sync to. We don't control that choice — `owl` is just
+another node on the channel; when a device is on the schedule, its presence frames
+are simply easier to observe.
 
 ---
 
-## How this payload maximizes iPhone "chatter" (stimulation)
+## L2 view: the MAC is always visible — the IPv6 only when they're actively using a service
 
-AWDL devices only reveal themselves while they are part of a synchronized cluster.
-The payload works by **making sure a cluster exists, and making itself the most
-attractive thing to talk to:**
+There are two different things you can learn over AWDL, and they come from two
+different places at layer 2:
 
-- **`owl` provides a live AWDL peer / master.** It advertises presence so a cluster
-  is always present on the social channel. Nearby iPhones must sync to it (and thus
-  broadcast PSF/MIF + hop with it) to stay reachable — turning passive, quiet phones
-  into responding, chatty ones.
-- **`avahi` presents an AirPlay 2 / AirPlay / companion-link lure** on `awdl0`.
-  An AirPlay-capable iPhone that sees a nearby receiver tends to resolve and answer
-  (mDNS queries/responses), which adds *data-plane* traffic and, when it answers,
-  exposes Bonjour names / service types / TXT records.
+**1. Presence ("awareness") — MAC + RSSI, always.** A device that is merely aware of
+its surroundings still broadcasts AWDL management/sync frames (PSF/MIF) in its
+availability windows. These are **broadcast L2 frames**, so any listener on the
+social channel reads the source AWDL MAC and its RSSI. No IP is involved and no data
+session is needed — this is what `owl` logs.
+
+**2. Reachability — IPv6 link-local, only while a service is in use.** To actually
+exchange IP (and therefore to `ping`/`nmap`) the device has to be running IP *over*
+the AWDL link. That happens when it is **actively using an AWDL service** (AirDrop,
+AirPlay, Handoff, …): it stands up `awdl0` as an IP link and auto-configures an IPv6
+**link-local** address.
+
+At L2 the two are tied together by the **EUI-64** rule: the link-local is built
+straight from the AWDL MAC — flip the U/L bit and insert `ff:fe` in the middle:
+
+```
+AWDL MAC   4e:ae:35:c3:4d:9c
+IPv6 LL    fe80::4cae:35ff:fec3:4d9c
+```
+
+So we can *derive* the expected `fe80::…` from the MAC we already see in presence.
+But deriving it is not the same as reaching it: the address is only **live**
+(assigned and answering) when the device has IP up on the AWDL link — i.e. when it is
+actively using a service, not merely aware. Until then it is a presence MAC with no
+answering address.
+
+**Why "aware" alone isn't enough to ping/scan.** AWDL is time-scheduled: a device
+only listens and transmits in its availability windows, and it takes part in the L3
+data plane (mDNS, ICMP, TCP/UDP over `awdl0`) as part of an active AWDL session. A
+device that is only beaconing presence may never process a unicast IP packet aimed at
+its link-local. Once it is engaged in a service it is on-schedule and running IP, so
+its `fe80::…` is reachable **on the AWDL link** — `ping6 -I awdl0 fe80::…`, or scan
+it — because we share that L2 link.
+
+Two practical consequences:
+
+- **The IPv6 is scoped to the AWDL link.** It is a link-local (`fe80::/64`) on
+  `awdl0`; you can reach it only from an interface on that same AWDL link, and only
+  while the device is participating. It is not globally routable.
+- **Presence proves the device exists; an active session is what makes it
+  addressable.** "I see the MAC/RSSI" does **not** mean "I can ping it." You get the
+  second only when the iPhone is actually *using* AWDL services.
+
+---
+
+## How this payload stimulates AWDL chatter
+
+AWDL devices are only observable while they take part in a synchronized cluster, and
+that participation is under **the device's** control, not ours. What this payload can
+do is keep **something present on the AWDL channel to interact with**, so that
+whenever an iPhone does engage AWDL it is more likely to be seen:
+
+- **`owl` provides a live AWDL peer.** It advertises presence so a cluster exists on
+  the social channel; nearby iPhones that choose to sync have a peer to sync to, and
+  while they're on that schedule their own presence frames are easier to catch.
+- **`avahi` presents an AirPlay 2 / AirPlay / companion-link lure** on `awdl0`. An
+  AirPlay-capable iPhone that notices a nearby receiver may resolve/answer it (mDNS),
+  which adds a little data-plane traffic and, when it answers, can expose Bonjour
+  names / service types / TXT records.
 - **Channel 6 by default** (the 2.4 GHz social channel) — the most universally
   supported meeting point, so the widest set of devices can join.
-- **Supervised, always-on rig.** `awdl_supervisor.sh` restarts any dropped component
-  so the lure/presence never lapses — continuity is what keeps phones chatting.
-- **Passive capture, zero cooperation from the target.** The observer just listens
-  to the PSF/MIF + neighbor table + mDNS that the stimulation produces.
+- **A supervised rig.** `awdl_supervisor.sh` restarts any dropped component so the
+  peer/lure stays present. That doesn't make phones talk — it just means *we* aren't
+  the reason a session gets missed.
+- **Passive capture, zero cooperation from the target.** The observer only listens to
+  the PSF/MIF + neighbor table + mDNS that devices happen to emit.
 
-Net effect: instead of waiting for an occasional probe, the payload keeps a cluster
-alive and a lure on the air so idle/locked iPhones keep surfacing.
+Net effect: alongside probe hunting, the payload keeps an AWDL peer and a lure on the
+air so iPhones that use AWDL (including idle/locked ones) are more likely to surface
+on this second channel.
 
 ---
 
