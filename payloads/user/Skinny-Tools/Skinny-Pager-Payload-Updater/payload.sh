@@ -1,7 +1,7 @@
 #!/bin/bash
 # Title: Skinny Pager Payload Updater
 # Description: Pager-UI launcher for the canonical install script. Replaces
-#              online-install.sh's keyboard S/H/B prompt with a 3-option
+#              online-install.sh's keyboard S/H/B/C prompt with a 4-option
 #              Pager picker, then exec's the install script with --select
 #              so the menu behavior is always in lockstep with the upstream
 #              code. This payload contains NO install logic of its own -
@@ -10,20 +10,29 @@
 # Version: 2.0
 #
 # Install flow (delegated to online-install.sh):
-#   0.  Pager picker: choose Skinny-Tools, Hak5 library/ payloads, or both
+#   0.  Pager picker: Skinny (full), Hak5, Both (full), or Pager Class
 #   1.  Internet connectivity check
-#   1A. Hak5 payload pull (H or B only) - cached at
+#   1A. Hak5 payload pull (H/B/C only) - cached at
 #         /mmc/root/.skinny-tools-cache/hak5-library/ on first run
-#   1B. Skinny-Tools source resolution (S or B only) - always fetched from
+#   1B. Skinny-Tools source resolution (S/B/C only) - always fetched from
 #         github.com/skinnyrad/Skinny-Pager-Payloads and cached at
 #         /mmc/root/.skinny-tools-cache/skinny-tools/. Falls back to the
 #         cached snapshot, then to the local clone, when offline.
-#   2.  Pre-flight dependency check (tcpdump, aircrack-ng, python3)  [S/B only]
-#   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/  [S/B only]
-#   4.  Payload tree mirror with new-payload and updated-payload detection
-#         (sha256 diff overwrites divergent files; nothing removed)  [S/B only]
-#   5.  Global pagerctl hardware-interface symlinks  [S/B only]
-#   6.  Verification & summary  [S/B only]
+#   2.  Dependency provisioning:
+#         full  = complete dependency + cross-compiled tool stack
+#         class = python3/ctypes + aircrack-ng + sqlite3 + BlueZ only
+#   3.  Recursive .ipk discovery & install under cross-compiled-pager-tools/
+#         [full profiles only]
+#   4.  Payload tree mirror with DISABLED.-aware updates
+#         (sha256 diff overwrites divergent files; nothing removed)
+#   5.  Global pagerctl hardware-interface symlinks
+#   6.  Verification & summary
+#
+# Pager Class copies all non-cross-compiled Skinny payloads except
+# PNL-Beacon-Lure, and guarantees foxhunt_AP, foxhunt_clients,
+# Aireplay-ng-AP-Deauth, PMF-Checker, Quick-Brown-Fox-AP,
+# Skinny-Skim-Scanner, gps-mgmtap-nmea, WiFi-Client-Tracker-Targeted, and
+# PAGERCTL.
 #
 # Uninstall phases (delegated to online-install.sh --uninstall):
 #   U1. Remove cross-compiled .ipk packages
@@ -44,12 +53,14 @@ case "${1:-}" in
     cat <<EOF
 Usage: $0 [--uninstall] [--help]
 
-Default (no flag):  Pager picker asks which payload sources to pull:
-                      [1] Skinny-Tools (full install/update)
+Default (no flag):  Pager picker asks which install profile to use:
+                      [1] Skinny Pager Payloads (full deps + tools)
                       [2] Hak5 library/ payloads from
                           github.com/hak5/wifipineapplepager-payloads
-                      [3] Both (Skinny-Tools + Hak5)
-                   All payload merges use no-clobber semantics: only
+                      [3] Both (Skinny + Hak5, full deps + tools)
+                      [4] Pager Class (Hak5 + non-cross-compiled Skinny
+                          payloads, minimal class deps)
+                   Payload merges are DISABLED.-aware and no-clobber: only
                    missing or upstream-divergent files are copied, nothing
                    on the Pager is ever removed by this payload.
   --uninstall, -u:   Delegates to online-install.sh --uninstall. Removes
@@ -114,14 +125,17 @@ fi
 # ==========================================
 ack=$(PROMPT "Skinny-Tools Payload Updater
 
-Select source:
+Select profile:
 
-1) Skinny-Tools
+1) Skinny Pager Payloads (full)
 2) Hak5 Payloads
-3) Both
+3) Both (full)
+4) Pager Class
 
-Re-runs skip identical files; new and updated upstream files are
-auto-applied. Nothing on the Pager is ever removed." "")
+Pager Class installs Hak5 plus the non-cross-compiled Skinny payloads
+and only the class dependencies. Re-runs skip identical files; new
+and updated upstream files are auto-applied. Nothing on the Pager is
+ever removed." "")
 case "$?" in
   "$DUCKYSCRIPT_CANCELLED") LOG "User cancelled."; exit 1 ;;
   "$DUCKYSCRIPT_REJECTED")  LOG "Rejected.";      exit 1 ;;
@@ -130,7 +144,7 @@ esac
 
 SELECTION=""
 while [ -z "$SELECTION" ]; do
-  NUM=$(NUMBER_PICKER "Choose option (1-3)" 3)
+  NUM=$(NUMBER_PICKER "Choose option (1-4)" 3)
   case "$?" in
     "$DUCKYSCRIPT_CANCELLED") LOG "User cancelled."; exit 1 ;;
     "$DUCKYSCRIPT_REJECTED")  LOG "Rejected.";      exit 1 ;;
@@ -140,7 +154,8 @@ while [ -z "$SELECTION" ]; do
     1) SELECTION="S" ;;
     2) SELECTION="H" ;;
     3) SELECTION="B" ;;
-    *) LOG red "[-] Invalid choice. Pick 1, 2, or 3." ;;
+    4) SELECTION="C" ;;
+    *) LOG red "[-] Invalid choice. Pick 1, 2, 3, or 4." ;;
   esac
 done
 LOG green "[+] Selected: $SELECTION"

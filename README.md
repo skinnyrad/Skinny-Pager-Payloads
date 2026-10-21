@@ -151,11 +151,17 @@ Skinny R&D utilizes this framework to drive direct Python interactions with the 
 
 #### Runtime dependencies provisioned by `online-install.sh`
 
-**All dependencies are mandatory** — the installer verifies every one and
-**hard-fails** (non-zero exit) if any tool or Python module is still missing
-after provisioning, so a successful run guarantees every payload works.
-OpenWrt splits the Python standard library, so several `python3-*` packages
-beyond `python3-light` are required.
+The **full profiles** (`S` and `B`) install and verify every dependency in the
+table below; a missing tool or Python module is a hard failure, so a successful
+full run guarantees every payload works. OpenWrt splits the Python standard
+library, so several `python3-*` packages beyond `python3-light` are required.
+
+The **Pager Class** profile (`C`) installs only a minimal subset:
+`python3-base`, `python3-light`, `python3-ctypes`, `aircrack-ng`,
+`sqlite3-cli`, `bluez-utils`, and `bluez-utils-btmon` (plus transitive
+libraries). It assumes the factory `iw` binary and `gpsd` service are present
+and prints a warning if they are not. No cross-compiled `.ipk`s and no wpad or
+AWDL staging are performed in class mode.
 
 | Dependency | Package(s) | Used by |
 |---|---|---|
@@ -202,26 +208,44 @@ SSH into your Pager as root, navigate to the persistent storage root directory, 
 
 > The usage summary below is informal; run `./online-install.sh --help` for the authoritative text emitted by the script itself.
 
-The installer is interactive: when run with no flag it prompts for a payload source.
+The installer is interactive: when run with no flag it prompts for an install profile.
 
 ```
-[S] Skinny-Tools   - Install / update the Skinny-Tools repo (default flow)
-[H] Hak5 payloads  - Pull github.com/hak5/wifipineapplepager-payloads
-                     and merge its library/ tree onto the Pager
-[B] Both           - Skinny-Tools + Hak5 payloads
+[S] Skinny Pager Payloads - full Skinny install/update:
+                            dependencies + cross-compiled tools
+[H] Hak5 Pager Payloads   - pull github.com/hak5/wifipineapplepager-payloads
+                            and merge its library/ tree onto the Pager
+[B] Both                  - Hak5 + Skinny, full dependencies + tools
+[C] Pager Class           - Hak5 + the non-cross-compiled Skinny payload set,
+                            with only the class dependency profile
 ```
 
-`S` and `B` require (or auto-fetch) the Skinny-Tools repo; `H` is self-contained and only needs internet access. Run it from inside the cloned `Skinny-Tools/` repository so it can discover `payloads/` and `cross-compiled-pager-tools/` directly. If a full local clone isn't present, `S`/`B` selections auto-fetch the GitHub tarball at runtime so a manual `git clone` is not strictly required.
+**Pager Class** copies all Skinny payloads except the ones that need the
+cross-compiled toolset (`att`, `ATT-Open-Steer`, `AWDL-Stim`, `WPAD-SWAP`) and
+`PNL-Beacon-Lure`. Its guaranteed payloads are `foxhunt_AP`, `foxhunt_clients`,
+`Aireplay-ng-AP-Deauth`, `PMF-Checker`, `Quick-Brown-Fox-AP`,
+`Skinny-Skim-Scanner`, `gps-mgmtap-nmea`, `WiFi-Client-Tracker-Targeted`, and
+`PAGERCTL`. It installs only `python3-base`, `python3-light`,
+`python3-ctypes`, `aircrack-ng`, `sqlite3-cli`, `bluez-utils`, and
+`bluez-utils-btmon` (plus their transitive libraries). No cross-compiled
+`.ipk`s and no wpad/AWDL staging.
+
+`S`, `B`, and `C` require (or auto-fetch) the Skinny-Tools source; `H` is
+Hak5-only. Run from inside the cloned repository so the script can discover
+`payloads/` and `cross-compiled-pager-tools/` directly. If a full local clone
+isn't present, online runs auto-fetch the GitHub tarball.
 
 ```
-./online-install.sh           # Install / update (interactive S/H/B prompt)
-./online-install.sh --uninstall   # Remove all Skinny-Tools customizations
-./online-install.sh --help        # Show authoritative usage text
+./online-install.sh                  # Interactive S/H/B/C prompt
+./online-install.sh --select C       # Pager Class, non-interactive
+./online-install.sh --offline        # Skip WAN/GitHub; use local repo or cache
+./online-install.sh --uninstall      # Remove all Skinny-Tools customizations
+./online-install.sh --help           # Show authoritative usage text
 ```
 
-Hak5 payload fetches are cached at `/mmc/root/.skinny-tools-cache/hak5-library/` so subsequent `H`/`B` runs skip the GitHub download and only diff the cached manifest against the Pager's filesystem. Delete that directory to force a fresh download on the next run.
+Hak5 payload fetches are cached at `/mmc/root/.skinny-tools-cache/hak5-library/` so subsequent `H`/`B`/`C` runs skip the GitHub download and only diff the cached manifest against the Pager's filesystem. Delete that directory to force a fresh download on the next run. With `--offline`, the local repository is preferred, then the cache.
 
-All payload merges use **no-clobber semantics**: missing payloads are copied in, but nothing already on the Pager is ever overwritten or removed by the install path. The script preserves any local tweaks you have made to existing payload files.
+Payload merges are **no-delete**: missing payloads are copied in and divergent upstream files are updated, but nothing is removed by the install path. Alert payloads honor the newer firmware's `DISABLED.<name>` toggle convention; `recon/` and `user/` payloads are never renamed by the Pager.
 
 ---
 
@@ -263,10 +287,11 @@ The `online-install.sh` script automatically deploys all custom tools into their
 
 ### Safe Merge Mapping
 
-The deployment uses two layers of no-clobber merging so re-runs are safe and local tweaks to existing payload files are preserved:
+The deployment is alert-aware for the newer firmware's toggle convention and no-delete for everything else:
 
-* **Dir-level no-clobber** for new sub-payloads. Both the Hak5 library fetch (Phase 1A) and the Skinny-Tools mirror (Phase 4) walk the source tree one payload at a time and copy each subdir into the destination only if no folder of that name already exists. Hak5's `library/user/` is walked one factory folder deeper than the Skinny-Tools walk because Hak5 nests payloads inside factory roots (e.g. `user/evil_portal/<payload>/payload.sh`); walking just one level would see those factory roots as already-present and silently skip every payload inside them.
-* **Per-file no-clobber** for Skinny-Tools payload files (Phase 4). A portable loop descends into existing destination directories and copies only files that aren't already present. This is needed because BusyBox's `cp -n` skips the entire copy when the destination dir already exists, which would silently break re-runs; the loop preserves any local edits to existing files.
+* **Alert `DISABLED.<name>` state.** A toggled-off alert is stored as `DISABLED.<name>`. The installer updates it in place and keeps it disabled. Genuinely new alerts are created as `DISABLED.<name>`, matching Hak5's own `UpdatePayloads` behavior. Duplicate enabled+disabled alert copies from older installer runs are repaired when the enabled copy is identical to the disabled copy or an unmodified upstream copy; edited duplicates are left with a warning. `recon/` and `user/` payloads are never renamed by the Pager and are always installed under their plain names.
+* **Per-payload sync.** Both the Hak5 fetch (Phase 1A) and the Skinny mirror (Phase 4) walk one payload at a time. Missing files are copied, and files whose sha256 differs from upstream are updated. Nothing is deleted by the install path. Hak5's `library/user/` is walked one factory folder deeper because Hak5 nests payloads inside factory roots (e.g. `user/evil_portal/<payload>/payload.sh`).
+* **Single engine.** The old whole-tree copy path was removed. The merge helper is the only payload sync engine, so the Hak5 and Skinny phases cannot drift.
 
 For the cross-compiled `.ipk` packages under `cross-compiled-pager-tools/`, install ordering matters: **library `.ipk` files install first, then tool `.ipk` files**, so cross-package dependencies resolve cleanly. Already-installed packages are detected via `opkg list-installed` and skipped without re-running `opkg install`.
 
