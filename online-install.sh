@@ -165,7 +165,10 @@ DEP_PROFILE="none"
 # Pager Class: payloads that need the cross-compiled toolset. Everything
 # else in the Skinny tree is mirrored, except PNL-Beacon-Lure, which is
 # intentionally omitted from the class preset.
+# user/Skinny-Tools/ATT is the legacy uppercase name used by old cached
+# snapshots (pre-rename att). Exclude both spellings.
 CLASS_EXCLUDE_CROSS="user/Skinny-Tools/att \
+user/Skinny-Tools/ATT \
 user/Skinny-Tools/ATT-Open-Steer \
 user/Skinny-Tools/AWDL-Stim \
 user/utilities/WPAD-SWAP"
@@ -713,57 +716,72 @@ fi
 if [ "$DO_HAK5" = "1" ]; then
   HAK5_CACHE_ROOT="/mmc/root/.skinny-tools-cache"
   HAK5_CACHE="$HAK5_CACHE_ROOT/hak5-library"
+  HAK5_AVAILABLE=0
+  HAK5_UNAVAILABLE_REASON=""
 
-  if [ -d "$HAK5_CACHE/alerts" ] && [ -d "$HAK5_CACHE/user" ] && [ -d "$HAK5_CACHE/recon" ]; then
-    echo "[*] Using cached Hak5 payload library at $HAK5_CACHE (delete to force refresh)"
-    HAK5_SRC="$HAK5_CACHE"
-  elif [ "$OFFLINE" = "1" ]; then
-    echo "[-] Critical Error: --offline was requested, but no Hak5 library cache exists at:"
-    echo "      $HAK5_CACHE"
-    echo "    Run once with internet access to populate it, or seed it manually."
-    exit 1
-  else
+  # Download + extract the upstream Hak5 library into the cache. Returns
+  # non-zero instead of exiting so B/C can continue to the Skinny phase.
+  fetch_hak5_library() {
     echo "[*] Fetching Hak5 payload library from github.com/hak5/wifipineapplepager-payloads..."
-
     HAK5_TARBALL_URL="https://github.com/hak5/wifipineapplepager-payloads/archive/refs/heads/master.tar.gz"
     HAK5_STAGE="$(mktemp -d -t hak5-payloads.XXXXXX)"
 
     # wget is the Pager's default fetcher; fall back to curl if missing.
     if command -v wget >/dev/null 2>&1; then
       if ! wget -qO "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-        echo "[-] Critical Error: wget failed to download Hak5 tarball."
-        exit 1
+        echo "[!] wget failed to download Hak5 tarball."
+        return 1
       fi
     elif command -v curl >/dev/null 2>&1; then
       if ! curl -fsSL -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-        echo "[-] Critical Error: curl failed to download Hak5 tarball."
-        exit 1
+        echo "[!] curl failed to download Hak5 tarball."
+        return 1
       fi
     else
-      echo "[-] Critical Error: neither wget nor curl is available on this Pager."
-      exit 1
+      echo "[!] Neither wget nor curl is available on this Pager."
+      return 1
     fi
 
     if ! tar -xzf "$HAK5_STAGE/hak5.tar.gz" -C "$HAK5_STAGE" 2>/dev/null; then
-      echo "[-] Critical Error: tar failed to extract Hak5 tarball."
-      exit 1
+      echo "[!] tar failed to extract Hak5 tarball."
+      return 1
     fi
 
     HAK5_SRC="$HAK5_STAGE/wifipineapplepager-payloads-master/library"
     if [ ! -d "$HAK5_SRC" ]; then
-      echo "[-] Critical Error: expected library/ folder missing in Hak5 tarball."
-      exit 1
+      echo "[!] Expected library/ folder missing in Hak5 tarball."
+      return 1
     fi
 
     # Persist the extracted library to /mmc so future runs skip the download.
     mkdir -p "$HAK5_CACHE_ROOT"
     rm -rf "$HAK5_CACHE"
-    cp -r "$HAK5_SRC" "$HAK5_CACHE"
+    if ! cp -r "$HAK5_SRC" "$HAK5_CACHE"; then
+      echo "[!] Failed to write the Hak5 cache at $HAK5_CACHE."
+      return 1
+    fi
     HAK5_SRC="$HAK5_CACHE"
     echo "[+] Hak5 library cached at $HAK5_CACHE for future runs."
+    return 0
+  }
+
+  if [ -d "$HAK5_CACHE/alerts" ] && [ -d "$HAK5_CACHE/user" ] && [ -d "$HAK5_CACHE/recon" ]; then
+    echo "[*] Using cached Hak5 payload library at $HAK5_CACHE (delete to force refresh)"
+    HAK5_SRC="$HAK5_CACHE"
+    HAK5_AVAILABLE=1
+  elif [ "$OFFLINE" = "1" ]; then
+    HAK5_UNAVAILABLE_REASON="--offline requested and no Hak5 cache exists"
+    echo "[!] Offline mode: no Hak5 library cache at $HAK5_CACHE."
+  else
+    if fetch_hak5_library; then
+      HAK5_AVAILABLE=1
+    else
+      HAK5_UNAVAILABLE_REASON="Hak5 download failed"
+    fi
   fi
 
-  mkdir -p "$SYSTEM_PAYLOADS_DEST"
+  if [ "$HAK5_AVAILABLE" = "1" ]; then
+    mkdir -p "$SYSTEM_PAYLOADS_DEST"
 
   HAK5_NEW=0
   HAK5_UPDATED=0
@@ -825,6 +843,14 @@ if [ "$DO_HAK5" = "1" ]; then
     echo "[!] WARNING: failed to copy Hak5 payloads:$HAK5_FAILED"
   fi
   echo "[+] Hak5 payload library merged into $SYSTEM_PAYLOADS_DEST/"
+  else
+    echo "[!] Hak5 payload library unavailable: $HAK5_UNAVAILABLE_REASON"
+    if [ "$DO_SKINNY" = "0" ]; then
+      echo "[-] Critical Error: Hak5-only profile has no payload source."
+      exit 1
+    fi
+    echo "[*] Continuing with the Skinny/Pager Class phases."
+  fi
 fi
 
 # ==========================================
@@ -837,8 +863,8 @@ fi
 #
 # Fetch order (online):
 #   1. GitHub tarball. On success, refresh the cache and use it.
-#   2. On failure: the existing cache.
-#   3. Then the local clone (git archive HEAD, or working tree).
+#   2. On failure: a complete local clone (git archive HEAD, or working tree).
+#   3. Then the cached snapshot, with a staleness warning.
 #   4. Otherwise: critical error.
 #
 # Offline order:
@@ -920,10 +946,10 @@ if [ "$DO_SKINNY" = "1" ]; then
       echo "[+] Skinny-Tools cache refreshed at $SKINNY_CACHE."
     else
       echo "[!] Failed to download Skinny-Tools tarball from GitHub."
-      if cache_complete; then
-        echo "[*] Falling back to cached Skinny-Tools snapshot at $SKINNY_CACHE (may be stale)."
-        SKINNY_SRC="$SKINNY_CACHE"
-      elif local_repo_complete; then
+      # Prefer a complete local clone over the cache: a freshly cloned repo
+      # is normally newer than the cache, and an old cache can use legacy
+      # payload names (e.g. ATT vs att) that defeat the class filter.
+      if local_repo_complete; then
         # Materialize a clean copy of HEAD from the local clone via `git
         # archive` rather than pointing at the working tree directly. This
         # respects the tracked index and skips untracked / .gitignored
@@ -932,7 +958,7 @@ if [ "$DO_SKINNY" = "1" ]; then
         # a fallback run. Falls back to the raw working tree only when
         # git is unavailable or the archive fails.
         if command -v git >/dev/null 2>&1 && [ -d "$REPO_DIR/.git" ]; then
-          echo "[!] No cache available; materializing local clone at $REPO_DIR via 'git archive HEAD' (may be stale)."
+          echo "[*] Download failed; using local clone at $REPO_DIR via 'git archive HEAD'."
           LOCAL_STAGE="$(mktemp -d -t skinny-local-archive.XXXXXX)"
           trap 'rm -rf "$HAK5_STAGE" "$SKINNY_STAGE" "$MERGE_TMP" "$LOCAL_STAGE" 2>/dev/null' EXIT
           if git -C "$REPO_DIR" archive --format=tar HEAD 2>/dev/null | tar -xf - -C "$LOCAL_STAGE" 2>/dev/null && \
@@ -945,9 +971,14 @@ if [ "$DO_SKINNY" = "1" ]; then
             SKINNY_SRC="$REPO_DIR"
           fi
         else
-          echo "[!] No cache available and no git binary; falling back to working tree at $REPO_DIR (untracked files may leak)."
+          echo "[!] No git binary; falling back to working tree at $REPO_DIR (untracked files may leak)."
           SKINNY_SRC="$REPO_DIR"
         fi
+      elif cache_complete; then
+        echo "[!] Download failed; using cached Skinny-Tools snapshot at $SKINNY_CACHE."
+        echo "    WARNING: the cache may be stale or use legacy payload names."
+        echo "    Delete it and re-run online to refresh, or use --offline with a local clone."
+        SKINNY_SRC="$SKINNY_CACHE"
       else
         echo "[-] Critical Error: no Skinny-Tools source available (no internet, no cache, no local clone)."
         exit 1
@@ -1376,6 +1407,12 @@ VERIFY_RC=$?
 
 if [ "$DEP_PROFILE" = "class" ]; then
     echo "[*] Verifying Pager Class payload set..."
+    for p in $CLASS_EXCLUDE_CROSS $CLASS_EXCLUDE_EXTRA; do
+        if [ -e "$SYSTEM_PAYLOADS_DEST/$p" ]; then
+            echo "[!] Warning: class-excluded payload is present: $p"
+            echo "    Remove it for a strict Pager Class set: rm -rf '$SYSTEM_PAYLOADS_DEST/$p'"
+        fi
+    done
     MISSING_CLASS=""
     for p in $CLASS_REQUIRED_PAYLOADS; do
         parent="$(dirname "$p")"

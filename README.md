@@ -243,7 +243,7 @@ isn't present, online runs auto-fetch the GitHub tarball.
 ./online-install.sh --help           # Show authoritative usage text
 ```
 
-Hak5 payload fetches are cached at `/mmc/root/.skinny-tools-cache/hak5-library/` so subsequent `H`/`B`/`C` runs skip the GitHub download and only diff the cached manifest against the Pager's filesystem. Delete that directory to force a fresh download on the next run. With `--offline`, the local repository is preferred, then the cache.
+Hak5 payload fetches are cached at `/mmc/root/.skinny-tools-cache/hak5-library/` so subsequent `H`/`B`/`C` runs skip the GitHub download and only diff the cached manifest against the Pager's filesystem. Delete that directory to force a fresh download on the next run. With `--offline`, the local repository is preferred, then the cache. If an online Skinny download fails, a complete local clone is preferred over the cached snapshot; the cache is used only when no local clone is available, and the fallback is logged with a staleness warning.
 
 Payload merges are **no-delete**: missing payloads are copied in and divergent upstream files are updated, but nothing is removed by the install path. Alert payloads honor the newer firmware's `DISABLED.<name>` toggle convention; `recon/` and `user/` payloads are never renamed by the Pager.
 
