@@ -1,13 +1,17 @@
 #!/bin/bash
 #
 # Title: Skinny-Skim-Scanner
-# Description: BLE lescan + signature grep, batched to LOG every 5s.
+# Description: BLE lescan + Classic inquiry run concurrently, signature grep,
+#              batched to LOG every 5s. Detects BLE skimmer bridges (HMSoft /
+#              HM-1x / JDY / TI CC254x OUI) and Classic HC-05/HC-06 modules.
 #              GREEN from broad scan opens a menu of detected skimmers
-#              (LRU 10, most recent first). Selecting one enters isolation
-#              tracking with live per-advertisement RSSI from btmon.
+#              (LRU 10, most recent first). Selecting a BLE one enters
+#              isolation tracking with live per-advertisement RSSI from btmon;
+#              selecting a Classic one enters presence tracking (Classic
+#              inquiry/name requests carry no RSSI without connecting).
 #              RED exits isolation back to broad scan.
 #              Any other button from broad scan quits the payload.
-# Version: 18.4
+# Version: 19.0
 # Author: Jeff Benson (erg0Pr0xy)
 #
 
@@ -19,6 +23,7 @@ fi
 WORK_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SIGNATURES="$WORK_DIR/skimmer_signatures.txt"
 SCAN_PID=""
+CLASSIC_PID=""
 DRAIN_PID=""
 ISOLATION_PID=""
 ISOLATION_LESCAN_PID=""
@@ -27,6 +32,8 @@ BTN_FILE="/tmp/.skim_btn"
 PICKED_FILE="/tmp/.skim_picked"
 SEEN_FILE="/tmp/.skim_seen"
 BUFFER_FILE="/tmp/.skim_buffer"
+CLASSIC_RAW="/tmp/.skim_classic"
+LAST_FILE="/tmp/.skim_last"
 MAX_SEEN=10
 
 # --- Helper: run a framework blocking call in a way that signals can interrupt.
@@ -50,6 +57,18 @@ blocking_run() {
     return $rc
 }
 
+# --- Helper: normalise a "MAC name" or "MAC<TAB>name" scan line and tag it.
+tag_scan() {
+    awk -v tag="$1" 'NF {
+        mac = $1
+        name = $0
+        # Classic scan lines start with a tab; strip leading space too.
+        sub(/^[ \t]*[^ \t]+[ \t]*/, "", name)
+        if (name == "") name = "(no name)"
+        print mac, tag, name
+    }'
+}
+
 # --- 1. HCI health check + reset ---
 killall -9 hcitool btmon 2>/dev/null
 hciconfig hci0 down 2>/dev/null; sleep 0.5
@@ -65,38 +84,41 @@ while IFS= read -r line; do
     [[ -z "$line" || "$line" == \#* ]] && continue
     PATTERN="${PATTERN:+$PATTERN|}$line"
 done < "$SIGNATURES"
-[ -z "$PATTERN" ] && PATTERN="HC-05|HC-06|linvor|JDY-|BT0[0-9]|HC-[0-9]"
+[ -z "$PATTERN" ] && PATTERN="HC-05|HC-06|linvor|JDY-|BT0[0-9]|HC-[0-9]|HMSoft|HM-[0-9]{2}"
 
 # --- 3. Cleanup ---
 cleanup() {
     [ -n "$BLOCKING_PGID" ] && kill -9 -$BLOCKING_PGID 2>/dev/null
     [ -n "$BLOCKING_PID" ] && kill -9 "$BLOCKING_PID" 2>/dev/null
     [ -n "$SCAN_PID" ] && kill -9 "$SCAN_PID" 2>/dev/null
+    [ -n "$CLASSIC_PID" ] && kill -9 "$CLASSIC_PID" 2>/dev/null
     [ -n "$DRAIN_PID" ] && kill -9 "$DRAIN_PID" 2>/dev/null
     [ -n "$ISOLATION_PID" ] && kill -9 "$ISOLATION_PID" 2>/dev/null
     [ -n "$ISOLATION_LESCAN_PID" ] && kill -9 "$ISOLATION_LESCAN_PID" 2>/dev/null
     killall -9 hcitool btmon 2>/dev/null
     pkill -9 -f "/tmp/.skim" 2>/dev/null
     LED OFF 2>/dev/null
-    rm -f "$BUFFER_FILE" "$SEEN_FILE" "$BTN_FILE" "$PICKED_FILE"
+    rm -f "$BUFFER_FILE" "$SEEN_FILE" "$BTN_FILE" "$PICKED_FILE" "$CLASSIC_RAW" "$LAST_FILE"
     exit 0
 }
 trap cleanup EXIT INT TERM HUP
 
 # --- 4. Startup prompt ---
-PROMPT "SKIMMER SCANNER v18.4
+PROMPT "SKIMMER SCANNER v19.0
 
-BLE broad scan every 5s.
+BLE + Classic scanning, batched every 5s.
+BLE: HMSoft, HM-1x, JDY, TI CC254x.
+Classic: HC-05, HC-06, serial clones.
 GREEN = menu of detected skimmers.
-Pick one to isolate with live RSSI.
-RED exits isolation.
+Pick one to isolate: live RSSI for BLE,
+presence for Classic. RED exits isolation.
 Any other button = quit."
 
 LOG "[+] Pattern: $PATTERN"
-LOG "[+] Scanning..."
+LOG "[+] Scanning BLE + Classic..."
 
 # One-time init
-rm -f "$BUFFER_FILE" "$SEEN_FILE"
+rm -f "$BUFFER_FILE" "$SEEN_FILE" "$CLASSIC_RAW"
 
 # --- 5. Seen-list helper (LRU by recency, max $MAX_SEEN entries) ---
 add_seen() {
@@ -110,34 +132,64 @@ add_seen() {
     mv "$tmp" "$SEEN_FILE"
 }
 
-# --- 6. Broad scan pipeline ---
+# --- 6. Broad scan pipeline (BLE + Classic concurrently) ---
 start_broad() {
     stop_broad
     stop_isolation
-    rm -f "$BUFFER_FILE"
+    rm -f "$BUFFER_FILE" "$CLASSIC_RAW"
     killall -9 hcitool 2>/dev/null
     sleep 0.3
     hciconfig hci0 up 2>/dev/null
     hciconfig hci0 piscan 2>/dev/null
 
+    # BLE: continuous, with duplicate reports. Re-arm if lescan exits (for
+    # example after the controller gets wedged by an inquiry sweep).
     (
-        hcitool lescan --duplicates 2>/dev/null \
-            | grep -i -E "$PATTERN" \
-            | grep -v "(unknown)" \
-            > "$BUFFER_FILE"
+        while true; do
+            hcitool lescan --duplicates 2>/dev/null \
+                | grep -i -E "$PATTERN" \
+                | grep -v "(unknown)" \
+                | tag_scan "(LE)" >> "$BUFFER_FILE"
+            sleep 1
+            hciconfig hci0 up 2>/dev/null
+        done
     ) &
     SCAN_PID=$!
+
+    # Classic: one ~10s inquiry sweep at a time. The MediaTek radio runs this
+    # concurrently with the LE scan (features: <LE and BR/EDR>).
+    (
+        fails=0
+        while true; do
+            if hcitool scan 2>/dev/null > "$CLASSIC_RAW"; then
+                grep -v -i '^Scanning' "$CLASSIC_RAW" \
+                    | grep -i -E "$PATTERN" \
+                    | tag_scan "(BR)" >> "$BUFFER_FILE"
+                fails=0
+            else
+                fails=$((fails + 1))
+                if [ "$fails" -ge 2 ]; then
+                    LOG yellow "[-] Classic inquiry unavailable; continuing BLE only."
+                    break
+                fi
+            fi
+            sleep 2
+        done
+    ) &
+    CLASSIC_PID=$!
 
     (
         LAST=""
         while true; do
             sleep 5
             NEW=$(sort -u "$BUFFER_FILE" 2>/dev/null)
+            : > "$BUFFER_FILE"
 
             if [ -n "$NEW" ]; then
                 if [ -n "$LAST" ]; then
-                    NEW_LINES=$(comm -23 <(printf '%s\n' "$NEW") <(printf '%s\n' "$LAST"))
-                    STILL_LINES=$(comm -12 <(printf '%s\n' "$NEW") <(printf '%s\n' "$LAST"))
+                    printf '%s\n' "$LAST" > "$LAST_FILE"
+                    NEW_LINES=$(printf '%s\n' "$NEW" | grep -Fxv -f "$LAST_FILE")
+                    STILL_LINES=$(printf '%s\n' "$NEW" | grep -Fxf "$LAST_FILE")
                 else
                     NEW_LINES="$NEW"
                     STILL_LINES=""
@@ -148,7 +200,7 @@ start_broad() {
                         [ -n "$line" ] && {
                             LOG "⚠ $line"
                             MAC=$(echo "$line" | awk '{print $1}')
-                            NAME=$(echo "$line" | awk '{$1=""; sub(/^ /,""); print}')
+                            NAME=$(echo "$line" | awk '{$1=""; sub(/^[ \t]+/,""); print}')
                             [ -n "$MAC" ] && add_seen "$MAC" "$NAME"
                         }
                     done
@@ -164,7 +216,6 @@ start_broad() {
             fi
 
             LAST="$NEW"
-            : > "$BUFFER_FILE"
         done
     ) &
     DRAIN_PID=$!
@@ -172,9 +223,11 @@ start_broad() {
 
 stop_broad() {
     [ -n "$SCAN_PID" ] && kill -9 "$SCAN_PID" 2>/dev/null
+    [ -n "$CLASSIC_PID" ] && kill -9 "$CLASSIC_PID" 2>/dev/null
     [ -n "$DRAIN_PID" ] && kill -9 "$DRAIN_PID" 2>/dev/null
     killall -9 hcitool 2>/dev/null
     SCAN_PID=""
+    CLASSIC_PID=""
     DRAIN_PID=""
     sleep 0.3
 }
@@ -245,7 +298,7 @@ show_menu() {
 start_isolation() {
     local target_mac="$1"
     local target_name
-    target_name=$(awk -v m="$target_mac" '$1==m { $1=""; sub(/^ /,""); print; exit }' "$SEEN_FILE" 2>/dev/null)
+    target_name=$(awk -v m="$target_mac" '$1==m { $1=""; sub(/^[ \t]+/,""); print; exit }' "$SEEN_FILE" 2>/dev/null)
     [ -z "$target_name" ] && target_name="(unknown)"
 
     stop_broad
@@ -258,28 +311,48 @@ start_isolation() {
     hciconfig hci0 piscan 2>/dev/null
 
     LED R 255 G 0 B 0 2>/dev/null
-    LOG green "[+] ISOLATION: $target_mac  ($target_name)"
-    LOG "[+] Live RSSI per advertisement. RED = back to broad scan."
 
-    # btmon is passive - it only logs HCI traffic. Drive the HCI into
-    # active LE scanning with a parallel lescan so btmon actually
-    # receives advertisements to filter.
-    (
-        hcitool lescan --duplicates 2>/dev/null > /dev/null
-    ) &
-    ISOLATION_LESCAN_PID=$!
+    if [[ "$target_name" == *"(BR)"* ]]; then
+        # Classic: inquiry results carry no RSSI without connecting, so track
+        # presence with remote name requests instead.
+        LOG green "[+] ISOLATION (Classic): $target_mac  ($target_name)"
+        LOG "[+] Presence tracking via name requests. RED = back to broad scan."
+        (
+            while true; do
+                n=$(hcitool name "$target_mac" 2>/dev/null)
+                if [ -n "$n" ]; then
+                    LOG green "[+] IN RANGE: $n"
+                else
+                    LOG yellow "[-] No response (out of range or busy)."
+                fi
+                sleep 3
+            done
+        ) &
+        ISOLATION_PID=$!
+    else
+        LOG green "[+] ISOLATION (BLE): $target_mac  ($target_name)"
+        LOG "[+] Live RSSI per advertisement. RED = back to broad scan."
 
-    (
-        btmon -i hci0 2>/dev/null | awk -v target="$target_mac" '
-            /Address:/ { gsub(/[()]/,""); split($0, a, " "); addr = a[2] }
-            /RSSI:/ && addr == target { print "RSSI: " $2 " dBm" }
-        ' | while IFS= read -r rline; do
-            [ -n "$rline" ] && {
-                LOG "$rline"
-            }
-        done
-    ) &
-    ISOLATION_PID=$!
+        # btmon is passive - it only logs HCI traffic. Drive the HCI into
+        # active LE scanning with a parallel lescan so btmon actually
+        # receives advertisements to filter.
+        (
+            hcitool lescan --duplicates 2>/dev/null > /dev/null
+        ) &
+        ISOLATION_LESCAN_PID=$!
+
+        (
+            btmon -i hci0 2>/dev/null | awk -v target="$target_mac" '
+                /Address:/ { gsub(/[()]/,""); split($0, a, " "); addr = a[2] }
+                /RSSI:/ && addr == target { print "RSSI: " $2 " dBm" }
+            ' | while IFS= read -r rline; do
+                [ -n "$rline" ] && {
+                    LOG "$rline"
+                }
+            done
+        ) &
+        ISOLATION_PID=$!
+    fi
 
     local btn
     while true; do

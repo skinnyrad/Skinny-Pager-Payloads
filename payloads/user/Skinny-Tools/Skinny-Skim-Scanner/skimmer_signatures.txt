@@ -20,6 +20,15 @@ SPP-C
 linvor
 RNBT-
 
+# === HM-1x / HMSoft BLE SERIAL MODULES ===
+# HM-10 factory default is "HMSoft"; HM-10/11/18 and clones (CC41-A, AT-09)
+# are BLE serial bridges commonly used in modern skimmers. They appear under
+# hcitool lescan (not Classic inquiry).
+HMSoft
+HM-[0-9]{2}
+CC41
+AT-09
+
 # === GENERIC BLUETOOTH SERIAL MODULES ===
 BT[0-9]{2}
 HC-[0-9]{2}
@@ -32,13 +41,16 @@ HC-[0-9]{2}
 98:D3:32
 98:D3:71
 20:13:08
+20:26:01
 00:18:E4
 00:14:03
 
 # JDY Series (BLE Modules)
 18:93:D7
-00:15:83
 00:18:30
+
+# Texas Instruments CC254x (HM-10 / HM-11 / CC41-A BLE modules)
+00:15:83
 
 # BT04 / BT05 / Generic Cheap BLE Clones
 33:03:30
