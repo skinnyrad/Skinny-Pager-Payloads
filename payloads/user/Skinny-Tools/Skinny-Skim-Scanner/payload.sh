@@ -11,7 +11,7 @@
 #              inquiry/name requests carry no RSSI without connecting).
 #              RED exits isolation back to broad scan.
 #              Any other button from broad scan quits the payload.
-# Version: 19.0
+# Version: 19.2
 # Author: Jeff Benson (erg0Pr0xy)
 #
 
@@ -21,7 +21,17 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 WORK_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SIGNATURES="$WORK_DIR/skimmer_signatures.txt"
+# The Pager copies payload.sh to /tmp but sets PAYLOAD_HOME to the installed
+# payload directory. Prefer that so companion files resolve correctly.
+if [ -n "${PAYLOAD_HOME:-}" ] && [ -r "${PAYLOAD_HOME}skimmer_signatures.txt" ]; then
+    SIGNATURES="${PAYLOAD_HOME}skimmer_signatures.txt"
+elif [ -r "$WORK_DIR/skimmer_signatures.txt" ]; then
+    SIGNATURES="$WORK_DIR/skimmer_signatures.txt"
+elif [ -r "$PWD/skimmer_signatures.txt" ]; then
+    SIGNATURES="$PWD/skimmer_signatures.txt"
+else
+    SIGNATURES="$WORK_DIR/skimmer_signatures.txt"
+fi
 SCAN_PID=""
 CLASSIC_PID=""
 DRAIN_PID=""
@@ -104,7 +114,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 # --- 4. Startup prompt ---
-PROMPT "SKIMMER SCANNER v19.0
+PROMPT "SKIMMER SCANNER v19.2
 
 BLE + Classic scanning, batched every 5s.
 BLE: HMSoft, HM-1x, JDY, TI CC254x.
@@ -113,9 +123,6 @@ GREEN = menu of detected skimmers.
 Pick one to isolate: live RSSI for BLE,
 presence for Classic. RED exits isolation.
 Any other button = quit."
-
-LOG "[+] Pattern: $PATTERN"
-LOG "[+] Scanning BLE + Classic..."
 
 # One-time init
 rm -f "$BUFFER_FILE" "$SEEN_FILE" "$CLASSIC_RAW"
@@ -162,7 +169,26 @@ start_broad() {
         fails=0
         while true; do
             if hcitool scan 2>/dev/null > "$CLASSIC_RAW"; then
-                grep -v -i '^Scanning' "$CLASSIC_RAW" \
+                # Label unnamed devices by their OUI instead of showing "n/a".
+                awk '
+                    function ouilabel(o) {
+                        if (o=="98:D3:31" || o=="98:D3:32" || o=="98:D3:71" ||
+                            o=="20:13:08" || o=="20:26:01" || o=="00:18:E4" ||
+                            o=="00:14:03") return "HC-05/06 (OUI)";
+                        if (o=="00:15:83") return "HM-10 (OUI)";
+                        if (o=="18:93:D7" || o=="00:18:30") return "JDY (OUI)";
+                        if (o=="33:03:30") return "BT04/05 (OUI)";
+                        if (o=="00:06:66") return "RNBT (OUI)";
+                        return "n/a";
+                    }
+                    /^[[:space:]]*[0-9A-Fa-f][0-9A-Fa-f]:/ {
+                        mac = $1;
+                        name = $0;
+                        sub(/^[ \t]*[^ \t]+[ \t]*/, "", name);
+                        if (name == "" || name == "n/a") name = ouilabel(substr(mac, 1, 8));
+                        print mac " " name;
+                    }
+                ' "$CLASSIC_RAW" \
                     | grep -i -E "$PATTERN" \
                     | tag_scan "(BR)" >> "$BUFFER_FILE"
                 fails=0
@@ -189,10 +215,8 @@ start_broad() {
                 if [ -n "$LAST" ]; then
                     printf '%s\n' "$LAST" > "$LAST_FILE"
                     NEW_LINES=$(printf '%s\n' "$NEW" | grep -Fxv -f "$LAST_FILE")
-                    STILL_LINES=$(printf '%s\n' "$NEW" | grep -Fxf "$LAST_FILE")
                 else
                     NEW_LINES="$NEW"
-                    STILL_LINES=""
                 fi
 
                 if [ -n "$NEW_LINES" ]; then
@@ -207,11 +231,6 @@ start_broad() {
                     LED R 255 G 0 B 0 2>/dev/null
                     sleep 0.6
                     LED OFF 2>/dev/null
-                fi
-
-                if [ -n "$STILL_LINES" ]; then
-                    COUNT=$(printf '%s\n' "$STILL_LINES" | grep -c .)
-                    LOG "[~] Still detecting $COUNT skimmer(s)."
                 fi
             fi
 
