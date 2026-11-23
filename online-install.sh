@@ -724,21 +724,37 @@ if [ "$DO_HAK5" = "1" ]; then
   fetch_hak5_library() {
     echo "[*] Fetching Hak5 payload library from github.com/hak5/wifipineapplepager-payloads..."
     HAK5_TARBALL_URL="https://github.com/hak5/wifipineapplepager-payloads/archive/refs/heads/master.tar.gz"
+    # github.com answers /archive URLs with a 302 to codeload; fetching
+    # codeload directly skips the redirect uclient-fetch mishandles.
+    HAK5_TARBALL_CODELOAD_URL="https://codeload.github.com/hak5/wifipineapplepager-payloads/tar.gz/refs/heads/master"
     HAK5_STAGE="$(mktemp -d -t hak5-payloads.XXXXXX)"
 
-    # wget is the Pager's default fetcher; fall back to curl if missing.
-    if command -v wget >/dev/null 2>&1; then
-      if ! wget -qO "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-        echo "[!] wget failed to download Hak5 tarball."
-        return 1
+    # curl first: the Pager's wget is a uclient-fetch symlink whose TLS/HTTP
+    # stack wedges on github.com's HTTP/1.1 responses (chunked bodies and
+    # /archive redirects), stalling until the timeout and reporting it as
+    # "Connection timed out". curl handles the same URLs correctly, so it is
+    # the preferred fetcher and wget is only a fallback.
+    fetch_ok=0
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fSL --connect-timeout 10 -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
+        fetch_ok=1
       fi
-    elif command -v curl >/dev/null 2>&1; then
-      if ! curl -fsSL -o "$HAK5_STAGE/hak5.tar.gz" "$HAK5_TARBALL_URL"; then
-        echo "[!] curl failed to download Hak5 tarball."
-        return 1
-      fi
-    else
-      echo "[!] Neither wget nor curl is available on this Pager."
+    fi
+    if [ "$fetch_ok" = "0" ] && command -v wget >/dev/null 2>&1; then
+      for url in "$HAK5_TARBALL_URL" "$HAK5_TARBALL_CODELOAD_URL"; do
+        if wget -qO "$HAK5_STAGE/hak5.tar.gz" "$url"; then
+          fetch_ok=1
+          break
+        fi
+      done
+    fi
+    if [ "$fetch_ok" = "0" ] && \
+       ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+      echo "[!] Neither curl nor wget is available on this Pager."
+      return 1
+    fi
+    if [ "$fetch_ok" = "0" ]; then
+      echo "[!] Failed to download Hak5 tarball."
       return 1
     fi
 
@@ -876,6 +892,10 @@ if [ "$DO_SKINNY" = "1" ]; then
   SKINNY_CACHE_ROOT="/mmc/root/.skinny-tools-cache"
   SKINNY_CACHE="$SKINNY_CACHE_ROOT/skinny-tools"
   SKINNY_TARBALL_URL="https://github.com/skinnyrad/Skinny-Pager-Payloads/archive/refs/heads/main.tar.gz"
+  # github.com answers /archive URLs with a 302 to codeload. Fetching codeload
+  # directly skips that redirect, which the Pager's wget (uclient-fetch)
+  # mishandles.
+  SKINNY_TARBALL_CODELOAD_URL="https://codeload.github.com/skinnyrad/Skinny-Pager-Payloads/tar.gz/refs/heads/main"
 
   SKINNY_SRC=""
   SKINNY_STAGE=""
@@ -911,17 +931,30 @@ if [ "$DO_SKINNY" = "1" ]; then
     echo "[*] Fetching Skinny-Tools from github.com/skinnyrad/Skinny-Pager-Payloads..."
     SKINNY_STAGE="$(mktemp -d -t skinny-tools.XXXXXX)"
 
+    # curl first: the Pager's wget is a uclient-fetch symlink whose TLS/HTTP
+    # stack wedges on github.com's HTTP/1.1 responses (chunked bodies and
+    # /archive redirects), stalling until the timeout and reporting it as
+    # "Connection timed out". curl handles the same URLs correctly, so it is
+    # the preferred fetcher and wget is only a fallback.
     fetch_ok=0
-    if command -v wget >/dev/null 2>&1; then
-      if wget -qO "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL" 2>/dev/null; then
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fSL --connect-timeout 10 -o "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL" 2>/dev/null; then
         fetch_ok=1
       fi
-    elif command -v curl >/dev/null 2>&1; then
-      if curl -fsSL -o "$SKINNY_STAGE/skinny.tar.gz" "$SKINNY_TARBALL_URL" 2>/dev/null; then
-        fetch_ok=1
-      fi
-    else
-      echo "[-] Critical Error: neither wget nor curl is available on this Pager."
+    fi
+    if [ "$fetch_ok" = "0" ] && command -v wget >/dev/null 2>&1; then
+      # Try codeload directly as well, since the /archive redirect from
+      # github.com is what wedges uclient-fetch.
+      for url in "$SKINNY_TARBALL_URL" "$SKINNY_TARBALL_CODELOAD_URL"; do
+        if wget -qO "$SKINNY_STAGE/skinny.tar.gz" "$url" 2>/dev/null; then
+          fetch_ok=1
+          break
+        fi
+      done
+    fi
+    if [ "$fetch_ok" = "0" ] && \
+       ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+      echo "[-] Critical Error: neither curl nor wget is available on this Pager."
       exit 1
     fi
 
