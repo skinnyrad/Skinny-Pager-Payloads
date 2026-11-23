@@ -1047,6 +1047,98 @@ if [ "$DO_SKINNY" = "1" ]; then
 # uses the factory gpsd service, and both are assumed present/factory.
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# scapy staging on /mmc
+# --------------------------------------------------------------------------
+# The Pager writes to a ~15 MB overlay (/dev/mtdblock6) that is normally
+# 80% full before anything is installed. The feed's scapy ipk unpacks to
+# ~9 MB, and asking opkg for it also resolves a python3-light upgrade that
+# writes the whole interpreter (~9 MB) into overlay on top of the ROM copy,
+# so the install cannot fit however much is cleaned up. Stage scapy on the
+# SD card instead and expose it with a .pth file in the real site-packages
+# directory: that costs a few bytes of overlay and leaves `import scapy`
+# working for every payload.
+provision_scapy_on_mmc() {
+  if [ ! -d /mmc ]; then
+    echo "[!] No /mmc mount; cannot stage scapy off the overlay."
+    return 1
+  fi
+
+  PY_SITE="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+  if [ -z "$PY_SITE" ]; then
+    echo "[!] Could not determine the python3 site-packages directory."
+    return 1
+  fi
+
+  echo "[*] scapy does not fit in the overlay; staging it on /mmc ..."
+  SCAPY_WORK="$(mktemp -d -t scapy.XXXXXX)"
+  SCAPY_IPK=""
+  if ( cd "$SCAPY_WORK" && opkg download scapy >/dev/null 2>&1 ); then
+    SCAPY_IPK="$(ls "$SCAPY_WORK"/scapy_*.ipk 2>/dev/null | head -n 1)"
+  fi
+  if [ -z "$SCAPY_IPK" ]; then
+    rm -rf "$SCAPY_WORK"
+    echo "[!] 'opkg download scapy' failed."
+    return 1
+  fi
+
+  # An .ipk is normally an ar archive, but some mirrors hand out a
+  # gzip-wrapped tar. Either way the payload is the data.tar.gz member.
+  SCAPY_DATA=""
+  tar -xzf "$SCAPY_IPK" -C "$SCAPY_WORK" 2>/dev/null
+  SCAPY_DATA="$(find "$SCAPY_WORK" -name data.tar.gz 2>/dev/null | head -n 1)"
+  if [ -z "$SCAPY_DATA" ]; then
+    python3 - "$SCAPY_IPK" "$SCAPY_WORK/data.tar.gz" <<'PY'
+import sys
+
+blob = open(sys.argv[1], "rb").read()
+if blob[:8] != b"!<arch>\n":
+    sys.exit(1)
+off = 8
+while off + 60 <= len(blob):
+    hdr = blob[off:off + 60]
+    name = hdr[:16].decode("ascii", "replace").strip()
+    size = int(hdr[48:58].decode("ascii").strip())
+    if name.startswith("data.tar"):
+        open(sys.argv[2], "wb").write(blob[off + 60:off + 60 + size])
+        sys.exit(0)
+    off += 60 + size + (size % 2)
+sys.exit(1)
+PY
+    [ -f "$SCAPY_WORK/data.tar.gz" ] && SCAPY_DATA="$SCAPY_WORK/data.tar.gz"
+  fi
+  if [ -z "$SCAPY_DATA" ]; then
+    rm -rf "$SCAPY_WORK"
+    echo "[!] Could not unpack the scapy ipk."
+    return 1
+  fi
+
+  MMC_PYLIB_ROOT="/mmc/pylibs"
+  rm -rf "$MMC_PYLIB_ROOT"
+  mkdir -p "$MMC_PYLIB_ROOT"
+  if ! tar -xzf "$SCAPY_DATA" -C "$MMC_PYLIB_ROOT"; then
+    rm -rf "$SCAPY_WORK"
+    echo "[!] Could not extract scapy to $MMC_PYLIB_ROOT."
+    return 1
+  fi
+  rm -rf "$SCAPY_WORK"
+
+  MMC_PY_SITE="$(find "$MMC_PYLIB_ROOT" -type d -name site-packages 2>/dev/null | head -n 1)"
+  if [ -z "$MMC_PY_SITE" ]; then
+    echo "[!] Extracted scapy has no site-packages directory."
+    return 1
+  fi
+  mkdir -p "$PY_SITE"
+  echo "$MMC_PY_SITE" > "$PY_SITE/mmc-pylibs.pth"
+
+  if python3 -c "import scapy" >/dev/null 2>&1; then
+    echo "[+] scapy staged at $MMC_PY_SITE (overlay untouched)."
+    return 0
+  fi
+  echo "[!] scapy staged at $MMC_PY_SITE but still not importable."
+  return 1
+}
+
 if [ "$DEP_PROFILE" = "class" ]; then
   REQUIRED_PKGS="$CLASS_PKGS"
   REQUIRED_BINS="$CLASS_BINS"
@@ -1100,6 +1192,13 @@ else
   echo "[*] Provisioning $PROFILE_LABEL dependencies..."
   # shellcheck disable=SC2086
   opkg install $REQUIRED_PKGS
+  # scapy is the one dependency that routinely does not fit: see the
+  # provision_scapy_on_mmc comment above. opkg's own failure for it (and for
+  # the python3-light upgrade it drags in) is expected and harmless as long
+  # as the import below succeeds.
+  if [ "$PROFILE_LABEL" = "full" ] && ! python3 -c "import scapy" >/dev/null 2>&1; then
+    provision_scapy_on_mmc || true
+  fi
   # Re-verify -- every dependency is mandatory, so any remaining gap aborts.
   STILL_TOOLS=""
   for tool in $REQUIRED_BINS; do
